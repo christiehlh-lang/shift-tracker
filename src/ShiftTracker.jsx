@@ -24,7 +24,8 @@ const KEMPSEY_RATES = {
   sunday: 98.35,
 };
 
-const FT_FORTNIGHTLY = 3064;
+// Full-time pay is a fixed TAKE-HOME (after-tax) amount per fortnight.
+const FT_NET = 3064;
 
 const JOBS = {
   aspen: { name: "Aspen", color: "#2563eb", light: "#dbeafe" },
@@ -375,8 +376,10 @@ function PaySummaryCard({ shifts, fortnightKey }) {
     if (s.job === "kempsey") { kempseyTotal += pay; kempseyHrs += parseFloat(s.hours) || 0; }
   });
 
-  const totalGross = aspenTotal + kempseyTotal + FT_FORTNIGHTLY;
-  const takeHome = estimateTakeHome(totalGross);
+  // Aspen + Kempsey are variable gross; full-time is already after-tax, so it's
+  // added straight to take-home (not run through the gross→net estimator).
+  const variableGross = aspenTotal + kempseyTotal;
+  const takeHome = estimateTakeHome(variableGross) + FT_NET;
 
   return (
     <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 12 }}>
@@ -394,18 +397,20 @@ function PaySummaryCard({ shifts, fortnightKey }) {
         </div>
         <div style={{ textAlign: "center" }}>
           <div style={{ fontSize: 11, color: JOBS.fulltime.color, fontWeight: 600 }}>Full-time</div>
-          <div style={{ fontSize: 16, fontWeight: 700 }}>{fmtMoney(FT_FORTNIGHTLY)}</div>
-          <div style={{ fontSize: 11, color: "var(--muted)" }}>fixed</div>
+          <div style={{ fontSize: 16, fontWeight: 700 }}>{fmtMoney(FT_NET)}</div>
+          <div style={{ fontSize: 11, color: "var(--muted)" }}>after tax</div>
         </div>
       </div>
       <div style={{ borderTop: "1px solid var(--border)", paddingTop: 10, display: "flex", justifyContent: "space-between" }}>
         <div>
-          <div style={{ fontSize: 12, color: "var(--muted)" }}>Total gross</div>
-          <div style={{ fontSize: 20, fontWeight: 800 }}>{fmtMoney(totalGross)}</div>
+          <div style={{ fontSize: 12, color: "var(--muted)" }}>Variable gross</div>
+          <div style={{ fontSize: 20, fontWeight: 800 }}>{fmtMoney(variableGross)}</div>
+          <div style={{ fontSize: 10, color: "var(--muted)" }}>Aspen + Kempsey</div>
         </div>
         <div style={{ textAlign: "right" }}>
           <div style={{ fontSize: 12, color: "var(--muted)" }}>Est. take-home</div>
           <div style={{ fontSize: 20, fontWeight: 800, color: "var(--accent)" }}>~{fmtMoney(takeHome)}</div>
+          <div style={{ fontSize: 10, color: "var(--muted)" }}>incl. ${FT_NET.toLocaleString()} FT after tax</div>
         </div>
       </div>
     </div>
