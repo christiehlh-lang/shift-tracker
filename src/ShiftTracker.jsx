@@ -1,5 +1,6 @@
-import { useState, useEffect } from "react";
-import { Calendar, DollarSign, Plus, Trash2, ChevronLeft, ChevronRight, X, AlertTriangle, FileText, Edit3 } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import { Calendar, DollarSign, Plus, Trash2, ChevronLeft, ChevronRight, X, AlertTriangle, FileText, Edit3, Upload, Check } from "lucide-react";
+import { parseAspenPdf } from "./aspenPdf";
 
 // ─── Pay rate configs ───
 const ASPEN_RATES = {
@@ -60,8 +61,9 @@ function getDayOfWeek(dateStr) {
 }
 
 function getFortnightKey(dateStr) {
-  // Anchor: 20/06/2025 is a known fortnight start (Friday)
-  const anchor = new Date(2025, 5, 20);
+  // Anchor: 20/06/2026 is a known Aspen pay-fortnight start (Saturday).
+  // Aspen fortnights run Saturday → Friday (14 days).
+  const anchor = new Date(2026, 5, 20);
   const d = new Date(dateStr);
   const diff = Math.floor((d - anchor) / (1000 * 60 * 60 * 24));
   const fnNum = Math.floor(diff / 14);
@@ -134,6 +136,11 @@ function getMonthDays(year, month) {
 
 function toDateStr(y, m, d) {
   return `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+
+// Local YYYY-MM-DD from a Date (avoids UTC shift from toISOString).
+function ymd(d) {
+  return toDateStr(d.getFullYear(), d.getMonth(), d.getDate());
 }
 
 // ─── Components ───
@@ -493,6 +500,121 @@ const fieldGroup = { marginBottom: 12 };
 const labelStyle = { display: "block", fontSize: 12, fontWeight: 600, color: "var(--muted)", marginBottom: 4 };
 const inputStyle = { width: "100%", padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 6, fontSize: 14, background: "var(--bg)", color: "var(--text)", boxSizing: "border-box" };
 
+function ImportOverlay({ state, onConfirm, onClose, existing }) {
+  const overlay = {
+    position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 200,
+    display: "flex", alignItems: "flex-end", justifyContent: "center",
+  };
+  const sheet = {
+    background: "var(--surface)", width: "100%", maxWidth: 520, maxHeight: "88vh",
+    overflowY: "auto", borderRadius: "16px 16px 0 0", padding: 20,
+    boxShadow: "0 -4px 24px rgba(0,0,0,0.2)",
+  };
+  const header = (title) => (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+      <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>{title}</h3>
+      <button onClick={onClose} style={iconBtnStyle}><X size={20} /></button>
+    </div>
+  );
+
+  if (state.loading) {
+    return <div style={overlay}><div style={sheet}><div style={{ padding: 40, textAlign: "center", color: "var(--muted)" }}>Reading PDF…</div></div></div>;
+  }
+  if (state.error) {
+    return (
+      <div style={overlay} onClick={onClose}>
+        <div style={sheet} onClick={e => e.stopPropagation()}>
+          {header("Import failed")}
+          <div style={{ fontSize: 14, color: "#dc2626", marginBottom: 16 }}>{state.error}</div>
+          <div style={{ fontSize: 13, color: "var(--muted)" }}>Make sure it's an Aspen Medical “Individual Schedule” roster PDF with the bold pay-period date range at the top.</div>
+          <button onClick={onClose} style={{ ...primaryBtn, width: "100%", marginTop: 16 }}>Close</button>
+        </div>
+      </div>
+    );
+  }
+
+  const { result } = state;
+  const { fortnightStart, fortnightEnd, shifts, summary } = result;
+  const { cat, oncall, workedHours, gross } = summary;
+  const fmtR = (d) => d.toLocaleDateString("en-AU", { day: "2-digit", month: "2-digit" });
+
+  // How many are new vs already imported.
+  const have = new Set(existing.map(s => `${s.date}|${s.startTime || ""}|${s.shiftType}|${s.notes || ""}`));
+  const newCount = shifts.filter((s) => {
+    const date = ymd(s.date);
+    const isOncall = s.kind === "oncall";
+    const notes = isOncall ? "On-call (imported)" : `${s.code} (imported)`;
+    return !have.has(`${date}|${s.start || ""}|${isOncall ? "oncall" : "clinical"}|${notes}`);
+  }).length;
+
+  const rows = [
+    ["Ordinary (07–15)", cat.ordinary, ASPEN_RATES.ordinary],
+    ["Evening (15–07)", cat.evening, ASPEN_RATES.evening],
+    ["Saturday", cat.saturday, ASPEN_RATES.saturday],
+    ["Sunday", cat.sunday, ASPEN_RATES.sunday],
+    ["Public holiday", cat.publicHoliday, ASPEN_RATES.publicHoliday],
+  ].filter(r => r[1] > 0);
+  const ocRows = [
+    ["On-call M–F", oncall.mf, ASPEN_RATES.onCallMF],
+    ["On-call Sat", oncall.sat, ASPEN_RATES.onCallSat],
+    ["On-call Sun/PH", oncall.sunph, ASPEN_RATES.onCallSunPH],
+  ].filter(r => r[1] > 0);
+
+  return (
+    <div style={overlay} onClick={onClose}>
+      <div style={sheet} onClick={e => e.stopPropagation()}>
+        {header("Review imported shifts")}
+        <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 4 }}>Pay fortnight (from PDF)</div>
+        <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 14 }}>{fmtR(fortnightStart)} – {fmtR(fortnightEnd)}</div>
+
+        {/* Breakdown */}
+        <div style={{ background: "var(--bg)", borderRadius: 10, padding: 12, marginBottom: 14 }}>
+          {rows.map(([label, h, rate]) => (
+            <div key={label} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "3px 0" }}>
+              <span>{label} <span style={{ color: "var(--muted)" }}>{h}h × ${rate}</span></span>
+              <span style={{ fontWeight: 600 }}>{fmtMoney(h * rate)}</span>
+            </div>
+          ))}
+          {ocRows.map(([label, n, rate]) => (
+            <div key={label} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "3px 0" }}>
+              <span>{label} <span style={{ color: "var(--muted)" }}>{n} × ${rate}</span></span>
+              <span style={{ fontWeight: 600 }}>{fmtMoney(n * rate)}</span>
+            </div>
+          ))}
+          <div style={{ borderTop: "1px solid var(--border)", marginTop: 8, paddingTop: 8, display: "flex", justifyContent: "space-between", fontWeight: 800 }}>
+            <span>{workedHours}h worked</span>
+            <span>{fmtMoney(gross)}</span>
+          </div>
+        </div>
+
+        {/* Shift list */}
+        <div style={{ fontSize: 13, fontWeight: 600, color: "var(--muted)", marginBottom: 6 }}>{shifts.length} shift{shifts.length === 1 ? "" : "s"} detected</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 16 }}>
+          {shifts.map((s, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, padding: "6px 10px", background: "var(--bg)", borderRadius: 6 }}>
+              <span style={{ width: 70, color: "var(--muted)" }}>{fmtDate(ymd(s.date))}</span>
+              <span style={{ flex: 1, fontWeight: 600 }}>
+                {s.kind === "oncall" ? "On-call" : s.code}
+                {s.start && <span style={{ fontWeight: 400, color: "var(--muted)" }}> {s.start}–{s.end}</span>}
+              </span>
+              <span style={{ fontWeight: 600 }}>
+                {s.kind === "oncall" ? "flat" : `${s.hours}h`}
+              </span>
+            </div>
+          ))}
+          {!shifts.length && <div style={{ fontSize: 13, color: "var(--muted)", padding: 8 }}>No countable shifts found in this fortnight.</div>}
+        </div>
+
+        <button onClick={onConfirm} disabled={newCount === 0}
+          style={{ ...primaryBtn, width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, opacity: newCount === 0 ? 0.5 : 1 }}>
+          <Check size={16} />
+          {newCount === 0 ? "Already imported" : `Add ${newCount} shift${newCount === 1 ? "" : "s"}`}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main App ───
 export default function ShiftTracker() {
   const [shifts, setShifts] = useState([]);
@@ -504,6 +626,8 @@ export default function ShiftTracker() {
   const [calMonth, setCalMonth] = useState(new Date().getMonth());
   const [selectedDate, setSelectedDate] = useState(null);
   const [jobFilter, setJobFilter] = useState("all");
+  const [importState, setImportState] = useState(null); // { loading } | { result } | { error }
+  const fileInputRef = useRef(null);
 
   // Load
   useEffect(() => {
@@ -527,6 +651,56 @@ export default function ShiftTracker() {
 
   const handleDelete = (id) => {
     setShifts(prev => prev.filter(s => s.id !== id));
+  };
+
+  // ─── Aspen PDF import ───
+  const handlePdfFile = async (file) => {
+    if (!file) return;
+    setImportState({ loading: true });
+    try {
+      const buf = await file.arrayBuffer();
+      const result = await parseAspenPdf(new Uint8Array(buf));
+      setImportState({ result });
+    } catch (e) {
+      console.error("PDF import failed:", e);
+      setImportState({ error: e.message || "Could not read this PDF." });
+    }
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const confirmImport = () => {
+    const { result } = importState;
+    setShifts(prev => {
+      const have = new Set(
+        prev.map(s => `${s.date}|${s.startTime || ""}|${s.shiftType}|${s.notes || ""}`)
+      );
+      const additions = [];
+      result.shifts.forEach((s, i) => {
+        const date = ymd(s.date);
+        const isOncall = s.kind === "oncall";
+        const notes = isOncall ? "On-call (imported)" : `${s.code} (imported)`;
+        const key = `${date}|${s.start || ""}|${isOncall ? "oncall" : "clinical"}|${notes}`;
+        if (have.has(key)) return;
+        have.add(key);
+        additions.push({
+          id: `${Date.now()}_${i}`,
+          job: "aspen",
+          date,
+          entryType: "shift",
+          shiftType: isOncall ? "oncall" : "clinical",
+          hours: isOncall ? 0 : s.hours,
+          ordinaryHours: isOncall ? 0 : s.ordinaryHours,
+          eveningHours: isOncall ? 0 : s.eveningHours,
+          isPublicHoliday: false,
+          kempseyRate: "morning",
+          startTime: s.start || "",
+          endTime: s.end || "",
+          notes,
+        });
+      });
+      return [...prev, ...additions];
+    });
+    setImportState(null);
   };
 
   const handleCalNav = (dir) => {
@@ -564,9 +738,36 @@ export default function ShiftTracker() {
     }}>
       {/* Header */}
       <div style={{ padding: "20px 16px 12px", borderBottom: "1px solid var(--border)", background: "var(--surface)" }}>
-        <h1 style={{ margin: 0, fontSize: 20, fontWeight: 800, letterSpacing: "-0.02em" }}>Shift Tracker</h1>
-        <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--muted)" }}>Track shifts, meetings, and pay across three jobs</p>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+          <div>
+            <h1 style={{ margin: 0, fontSize: 20, fontWeight: 800, letterSpacing: "-0.02em" }}>Shift Tracker</h1>
+            <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--muted)" }}>Track shifts, meetings, and pay across three jobs</p>
+          </div>
+          <button
+            onClick={() => fileInputRef.current && fileInputRef.current.click()}
+            style={{ ...tagBtn, display: "flex", alignItems: "center", gap: 6, background: JOBS.aspen.color, color: "#fff", borderColor: JOBS.aspen.color, flexShrink: 0 }}
+          >
+            <Upload size={14} /> Import Aspen PDF
+          </button>
+        </div>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="application/pdf,.pdf"
+          style={{ display: "none" }}
+          onChange={e => handlePdfFile(e.target.files && e.target.files[0])}
+        />
       </div>
+
+      {/* Import overlay */}
+      {importState && (
+        <ImportOverlay
+          state={importState}
+          onConfirm={confirmImport}
+          onClose={() => setImportState(null)}
+          existing={shifts}
+        />
+      )}
 
       {/* Job filter */}
       <div style={{ display: "flex", gap: 6, padding: "10px 16px", overflowX: "auto" }}>

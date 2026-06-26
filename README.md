@@ -9,6 +9,12 @@ fortnightly pay summaries, and a fatigue-load indicator.
 - **Calendar view** — month grid with colour-coded dots per job; tap a day to see its entries.
 - **Pay view** — fortnightly gross pay per job plus an estimated take-home figure.
 - **List view** — current fortnight (or a selected day) with per-shift pay.
+- **Import Aspen roster PDF** — upload an Aspen Medical "Individual Schedule" PDF and
+  the app reads the grid, identifies the pay fortnight from the bold date range at the
+  top, extracts only the countable shifts (OCC Health / HIAS / TRAIN clinical hours and
+  OcH OC on-call), splits weekday hours into ordinary/evening, and shows a review sheet
+  with the computed gross before adding them. AV / DO / CS / CS24 (safety check) / SA
+  are ignored. Parsing runs entirely in the browser (pdf.js) — nothing is uploaded.
 - **Add / edit entries** — shifts, meetings, or notes with job, date, times, hours and notes.
 - **Award-rate engine** — Aspen (ordinary/evening/weekend/PH/on-call/called-in) and
   Kempsey ED (morning/afternoon/weekend) rates, computed automatically.
