@@ -74,17 +74,6 @@ function getFortnightKey(dateStr) {
   return `${start.toISOString().slice(0, 10)}_${end.toISOString().slice(0, 10)}`;
 }
 
-// Kempsey runs on the same fortnightly cycle as Aspen but its weeks are
-// Monday–Sunday (not Saturday–Friday), so its pay fortnight is shifted +2 days:
-// e.g. Aspen Sat 20/06 – Fri 03/07 pairs with Kempsey Mon 22/06 – Sun 05/07.
-function getKempseyWindow(aspenFortnightKey) {
-  const [s] = aspenFortnightKey.split("_");
-  const start = new Date(s + "T00:00:00");
-  start.setDate(start.getDate() + 2); // Saturday -> Monday
-  const end = new Date(start.getTime() + 13 * 86400000);
-  return { start, end };
-}
-
 // The Aspen-fortnight card a shift belongs to. Kempsey dates are shifted back
 // 2 days so a Kempsey shift lands in the same card whose Mon–Sun window covers it.
 function shiftFortnightKey(s) {
@@ -96,11 +85,83 @@ function shiftFortnightKey(s) {
   return getFortnightKey(s.date);
 }
 
-function fortnightLabel(key) {
-  const [s, e] = key.split("_");
-  const fmt = (d) => new Date(d).toLocaleDateString("en-AU", { day: "2-digit", month: "2-digit" });
-  return `${fmt(s)} - ${fmt(e)}`;
+// ─── Per-job pay cycles ───
+// Each job is paid fortnightly but on a different window:
+//   Aspen     — Saturday → Friday
+//   Kempsey   — Monday → Sunday (same cycle, shifted +2 days)
+//   Full-time — opposite/alternate week to Aspen (shifted +7 days)
+const ASPEN_ANCHOR = new Date(2026, 5, 20);   // Sat 20/06/2026
+const KEMPSEY_ANCHOR = new Date(2026, 5, 22); // Mon 22/06/2026
+const FT_ANCHOR = new Date(2026, 5, 27);      // Sat 27/06/2026 (alternate week)
+const JOB_ANCHOR = { aspen: ASPEN_ANCHOR, kempsey: KEMPSEY_ANCHOR, fulltime: FT_ANCHOR };
+
+// The pay window for a job at a given offset (0 = the period containing `base`,
+// -1 = previous, +1 = next).
+function payWindow(job, base, offset = 0) {
+  const anchor = JOB_ANCHOR[job];
+  const d = base instanceof Date ? base : new Date(base + "T00:00:00");
+  const diff = Math.floor((d - anchor) / 86400000);
+  const fn = Math.floor(diff / 14) + offset;
+  const start = new Date(anchor.getTime() + fn * 14 * 86400000);
+  const end = new Date(start.getTime() + 13 * 86400000);
+  return { start, end };
 }
+
+function inWindow(dateStr, win) {
+  const d = new Date(dateStr + "T00:00:00");
+  return d >= win.start && d <= win.end;
+}
+
+function windowLabel(win) {
+  const fmt = (d) => d.toLocaleDateString("en-AU", { weekday: "short", day: "2-digit", month: "short" });
+  return `${fmt(win.start)} – ${fmt(win.end)}`;
+}
+
+// ─── Pay breakdowns from stored shift objects ───
+function aspenBreakdown(list) {
+  const cats = { ordinary: 0, evening: 0, saturday: 0, sunday: 0, publicHoliday: 0 };
+  const oncall = { mf: 0, sat: 0, sunph: 0 };
+  const calledin = { h15: 0, h2: 0 };
+  let gross = 0, workedHours = 0;
+  list.forEach(s => {
+    gross += calcShiftPay(s);
+    const dow = getDayOfWeek(s.date);
+    const hours = parseFloat(s.hours) || 0;
+    if (s.shiftType === "oncall") {
+      if (dow === 0 || s.isPublicHoliday) oncall.sunph++;
+      else if (dow === 6) oncall.sat++;
+      else oncall.mf++;
+      return;
+    }
+    if (s.shiftType === "calledin15") { calledin.h15 += hours; workedHours += hours; return; }
+    if (s.shiftType === "calledin2") { calledin.h2 += hours; workedHours += hours; return; }
+    workedHours += hours;
+    if (s.isPublicHoliday) { cats.publicHoliday += hours; return; }
+    if (dow === 0) { cats.sunday += hours; return; }
+    if (dow === 6) { cats.saturday += hours; return; }
+    const ord = parseFloat(s.ordinaryHours) || 0;
+    const eve = parseFloat(s.eveningHours) || 0;
+    if (ord || eve) { cats.ordinary += ord; cats.evening += eve; }
+    else cats.ordinary += hours;
+  });
+  return { cats, oncall, calledin, gross, workedHours };
+}
+
+function kempseyBreakdown(list) {
+  const rates = { morning: 0, afternoon10to1: 0, afternoon1to4: 0, saturday: 0, sunday: 0 };
+  let gross = 0, hours = 0;
+  list.forEach(s => {
+    gross += calcShiftPay(s);
+    const h = parseFloat(s.hours) || 0;
+    hours += h;
+    const dow = getDayOfWeek(s.date);
+    if (dow === 0) rates.sunday += h;
+    else if (dow === 6) rates.saturday += h;
+    else rates[s.kempseyRate || "morning"] += h;
+  });
+  return { rates, gross, hours };
+}
+
 
 function calcAspenPay(shift) {
   const dow = getDayOfWeek(shift.date);
@@ -321,6 +382,28 @@ function ShiftForm({ onSave, editShift, onCancel }) {
   );
 }
 
+// Short label for a calendar entry chip.
+function entryLabel(s) {
+  if (s.entryType === "meeting") return s.notes ? s.notes : "Meeting";
+  if (s.entryType === "note") return s.notes ? s.notes : "Note";
+  if (s.job === "aspen") {
+    if (s.shiftType === "oncall") return "On-call";
+    if (s.shiftType === "calledin15") return "Called-in 1.5×";
+    if (s.shiftType === "calledin2") return "Called-in 2×";
+    const m = (s.notes || "").match(/^(OCC Health|HIAS|TRAIN)/);
+    return m ? m[1] : "Aspen";
+  }
+  if (s.job === "kempsey") return "Kempsey";
+  return "Full-time";
+}
+
+function entryChipColors(s) {
+  if (s.entryType === "meeting") return { bg: "#fef3c7", fg: "#92400e" };
+  if (s.entryType === "note") return { bg: "#e0e7ff", fg: "#3730a3" };
+  const j = JOBS[s.job];
+  return { bg: j?.light || "#eee", fg: j?.color || "#333" };
+}
+
 function CalendarView({ shifts, year, month, onNav, onDayClick }) {
   const days = getMonthDays(year, month);
   const monthLabel = new Date(year, month).toLocaleDateString("en-AU", { month: "long", year: "numeric" });
@@ -328,7 +411,9 @@ function CalendarView({ shifts, year, month, onNav, onDayClick }) {
   const shiftsForDay = (d) => {
     if (!d) return [];
     const ds = toDateStr(year, month, d);
-    return shifts.filter(s => s.date === ds);
+    return shifts
+      .filter(s => s.date === ds)
+      .sort((a, b) => (a.startTime || "").localeCompare(b.startTime || ""));
   };
 
   return (
@@ -338,8 +423,8 @@ function CalendarView({ shifts, year, month, onNav, onDayClick }) {
         <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>{monthLabel}</h3>
         <button onClick={() => onNav(1)} style={iconBtnStyle} aria-label="Next month"><ChevronRight size={20} /></button>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 2 }}>
-        {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map(d => (
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 }}>
+        {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(d => (
           <div key={d} style={{ textAlign: "center", fontSize: 11, fontWeight: 600, color: "var(--muted)", padding: "4px 0" }}>{d}</div>
         ))}
         {days.map((d, i) => {
@@ -349,25 +434,29 @@ function CalendarView({ shifts, year, month, onNav, onDayClick }) {
             <div key={i}
               onClick={() => d && onDayClick(toDateStr(year, month, d))}
               style={{
-                minHeight: 48, borderRadius: 6, padding: 3, cursor: d ? "pointer" : "default",
+                minHeight: 96, borderRadius: 8, padding: 4, cursor: d ? "pointer" : "default",
                 background: isToday ? "var(--accent-light)" : d ? "var(--surface)" : "transparent",
-                border: isToday ? "2px solid var(--accent)" : "1px solid transparent",
-                transition: "background 0.15s",
+                border: isToday ? "2px solid var(--accent)" : "1px solid var(--border)",
+                display: "flex", flexDirection: "column", gap: 3, overflow: "hidden",
               }}
-              onMouseEnter={e => { if (d) e.currentTarget.style.background = "var(--hover)"; }}
-              onMouseLeave={e => { if (d) e.currentTarget.style.background = isToday ? "var(--accent-light)" : "var(--surface)"; }}
             >
               {d && (
                 <>
-                  <div style={{ fontSize: 12, fontWeight: isToday ? 700 : 400, textAlign: "right", paddingRight: 2 }}>{d}</div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 2, marginTop: 2 }}>
-                    {dayShifts.map(s => (
-                      <div key={s.id} style={{
-                        width: 6, height: 6, borderRadius: 3,
-                        background: JOBS[s.job]?.color || "#888",
-                      }} title={`${JOBS[s.job]?.name} ${s.entryType}`} />
-                    ))}
-                  </div>
+                  <div style={{ fontSize: 12, fontWeight: isToday ? 800 : 500, textAlign: "right", paddingRight: 2, color: isToday ? "var(--accent)" : "var(--text)" }}>{d}</div>
+                  {dayShifts.map(s => {
+                    const c = entryChipColors(s);
+                    return (
+                      <div key={s.id} title={`${JOBS[s.job]?.name || ""} ${entryLabel(s)} ${s.startTime || ""}${s.endTime ? "–" + s.endTime : ""}`}
+                        style={{
+                          background: c.bg, color: c.fg, borderRadius: 4, padding: "2px 4px",
+                          fontSize: 10, lineHeight: 1.25, fontWeight: 600,
+                          whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                        }}>
+                        {s.startTime ? <span style={{ fontWeight: 700 }}>{s.startTime} </span> : null}
+                        {entryLabel(s)}
+                      </div>
+                    );
+                  })}
                 </>
               )}
             </div>
@@ -375,82 +464,154 @@ function CalendarView({ shifts, year, month, onNav, onDayClick }) {
         })}
       </div>
       {/* Legend */}
-      <div style={{ display: "flex", gap: 16, marginTop: 10, fontSize: 12, color: "var(--muted)" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 14, marginTop: 12, fontSize: 12, color: "var(--muted)" }}>
         {Object.entries(JOBS).map(([k, v]) => (
           <div key={k} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <div style={{ width: 8, height: 8, borderRadius: 4, background: v.color }} />
+            <div style={{ width: 10, height: 10, borderRadius: 3, background: v.light, border: `1px solid ${v.color}` }} />
             {v.name}
           </div>
         ))}
+        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <div style={{ width: 10, height: 10, borderRadius: 3, background: "#fef3c7", border: "1px solid #92400e" }} />
+          Meeting
+        </div>
       </div>
     </div>
   );
 }
 
-function PaySummaryCard({ shifts, fortnightKey }) {
-  // Aspen (and the full-time slot) use this Sat–Fri fortnight.
-  const aspenShifts = shifts.filter(s => s.job === "aspen" && s.entryType === "shift" && getFortnightKey(s.date) === fortnightKey);
-  // Kempsey uses the paired Mon–Sun window (shifted +2 days).
-  const kWin = getKempseyWindow(fortnightKey);
-  const inKempsey = (dateStr) => {
-    const d = new Date(dateStr + "T00:00:00");
-    return d >= kWin.start && d <= kWin.end;
-  };
-  const kempseyShifts = shifts.filter(s => s.job === "kempsey" && s.entryType === "shift" && inKempsey(s.date));
+function PayRow({ label, sub, value, bold }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "3px 0", fontSize: 13, fontWeight: bold ? 700 : 400 }}>
+      <span>{label} {sub && <span style={{ color: "var(--muted)", fontSize: 12 }}>{sub}</span>}</span>
+      <span style={{ fontWeight: bold ? 800 : 600 }}>{value}</span>
+    </div>
+  );
+}
 
-  let aspenTotal = 0, kempseyTotal = 0;
-  let aspenHrs = 0, kempseyHrs = 0;
+// Combined overview of the current pay period across all three jobs.
+function OverallPayCard({ shifts, base }) {
+  const aWin = payWindow("aspen", base);
+  const kWin = payWindow("kempsey", base);
+  const fWin = payWindow("fulltime", base);
+  const aspen = aspenBreakdown(shifts.filter(s => s.job === "aspen" && s.entryType === "shift" && inWindow(s.date, aWin)));
+  const kempsey = kempseyBreakdown(shifts.filter(s => s.job === "kempsey" && s.entryType === "shift" && inWindow(s.date, kWin)));
 
-  aspenShifts.forEach(s => {
-    aspenTotal += calcShiftPay(s);
-    if (s.shiftType !== "oncall") aspenHrs += parseFloat(s.hours) || 0;
-  });
-  kempseyShifts.forEach(s => {
-    kempseyTotal += calcShiftPay(s);
-    kempseyHrs += parseFloat(s.hours) || 0;
-  });
-
-  // Aspen + Kempsey are variable (casual) gross run through the gross→net
-  // estimator; full-time has fixed gross/net, so its net is added straight to
-  // take-home and its gross to the total gross.
-  const variableGross = aspenTotal + kempseyTotal;
+  const variableGross = aspen.gross + kempsey.gross;
   const totalGross = variableGross + FT_GROSS;
   const takeHome = estimateTakeHome(variableGross) + FT_NET;
 
+  const col = (name, color, value, periodWin, sub) => (
+    <div style={{ flex: "1 1 150px", background: "var(--bg)", borderRadius: 8, padding: "10px 12px" }}>
+      <div style={{ fontSize: 11, color, fontWeight: 700 }}>{name}</div>
+      <div style={{ fontSize: 18, fontWeight: 800 }}>{value}</div>
+      {sub && <div style={{ fontSize: 10, color: "var(--muted)" }}>{sub}</div>}
+      <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2 }}>{windowLabel(periodWin)}</div>
+    </div>
+  );
+
   return (
-    <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 12 }}>
-      <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 4 }}>{fortnightLabel(fortnightKey)}</div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 12 }}>
-        <div style={{ textAlign: "center" }}>
-          <div style={{ fontSize: 11, color: JOBS.aspen.color, fontWeight: 600 }}>Aspen</div>
-          <div style={{ fontSize: 16, fontWeight: 700 }}>{fmtMoney(aspenTotal)}</div>
-          <div style={{ fontSize: 11, color: "var(--muted)" }}>{aspenHrs}h worked</div>
-        </div>
-        <div style={{ textAlign: "center" }}>
-          <div style={{ fontSize: 11, color: JOBS.kempsey.color, fontWeight: 600 }}>Kempsey</div>
-          <div style={{ fontSize: 16, fontWeight: 700 }}>{fmtMoney(kempseyTotal)}</div>
-          <div style={{ fontSize: 11, color: "var(--muted)" }}>{kempseyHrs}h worked</div>
-          <div style={{ fontSize: 9, color: "var(--muted)" }}>
-            {kWin.start.toLocaleDateString("en-AU", { day: "2-digit", month: "2-digit" })}–{kWin.end.toLocaleDateString("en-AU", { day: "2-digit", month: "2-digit" })}
-          </div>
-        </div>
-        <div style={{ textAlign: "center" }}>
-          <div style={{ fontSize: 11, color: JOBS.fulltime.color, fontWeight: 600 }}>Full-time</div>
-          <div style={{ fontSize: 16, fontWeight: 700 }}>{fmtMoney(FT_GROSS)}</div>
-          <div style={{ fontSize: 11, color: "var(--muted)" }}>{fmtMoney(FT_NET)} net</div>
-        </div>
+    <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>This pay period — overall</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
+        {col("Aspen", JOBS.aspen.color, fmtMoney(aspen.gross), aWin, `${+aspen.workedHours.toFixed(1)}h worked`)}
+        {col("Kempsey", JOBS.kempsey.color, fmtMoney(kempsey.gross), kWin, `${+kempsey.hours.toFixed(1)}h worked`)}
+        {col("Full-time", JOBS.fulltime.color, fmtMoney(FT_GROSS), fWin, `${fmtMoney(FT_NET)} net`)}
       </div>
       <div style={{ borderTop: "1px solid var(--border)", paddingTop: 10, display: "flex", justifyContent: "space-between" }}>
         <div>
           <div style={{ fontSize: 12, color: "var(--muted)" }}>Total gross</div>
-          <div style={{ fontSize: 20, fontWeight: 800 }}>{fmtMoney(totalGross)}</div>
+          <div style={{ fontSize: 22, fontWeight: 800 }}>{fmtMoney(totalGross)}</div>
           <div style={{ fontSize: 10, color: "var(--muted)" }}>incl. ${FT_GROSS.toLocaleString()} FT</div>
         </div>
         <div style={{ textAlign: "right" }}>
           <div style={{ fontSize: 12, color: "var(--muted)" }}>Est. take-home</div>
-          <div style={{ fontSize: 20, fontWeight: 800, color: "var(--accent)" }}>~{fmtMoney(takeHome)}</div>
+          <div style={{ fontSize: 22, fontWeight: 800, color: "var(--accent)" }}>~{fmtMoney(takeHome)}</div>
           <div style={{ fontSize: 10, color: "var(--muted)" }}>incl. ${FT_NET.toLocaleString()} FT net</div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// One job's pay, with its own cycle navigation and category breakdown.
+function JobPayPanel({ job, shifts, base }) {
+  const [offset, setOffset] = useState(0);
+  const win = payWindow(job, base, offset);
+  const info = JOBS[job];
+  const list = shifts.filter(s => s.job === job && s.entryType === "shift" && inWindow(s.date, win));
+
+  let body = null, total = 0, footerSub = null;
+
+  if (job === "aspen") {
+    const b = aspenBreakdown(list);
+    total = b.gross;
+    const rows = [
+      ["Ordinary (07–15)", b.cats.ordinary, ASPEN_RATES.ordinary],
+      ["Evening (15–07)", b.cats.evening, ASPEN_RATES.evening],
+      ["Saturday", b.cats.saturday, ASPEN_RATES.saturday],
+      ["Sunday", b.cats.sunday, ASPEN_RATES.sunday],
+      ["Public holiday", b.cats.publicHoliday, ASPEN_RATES.publicHoliday],
+      ["Called-in 1.5×", b.calledin.h15, ASPEN_RATES.calledIn15],
+      ["Called-in 2×", b.calledin.h2, ASPEN_RATES.calledIn2],
+    ].filter(r => r[1] > 0);
+    const oc = [
+      ["On-call M–F", b.oncall.mf, ASPEN_RATES.onCallMF],
+      ["On-call Sat", b.oncall.sat, ASPEN_RATES.onCallSat],
+      ["On-call Sun/PH", b.oncall.sunph, ASPEN_RATES.onCallSunPH],
+    ].filter(r => r[1] > 0);
+    footerSub = `${+b.workedHours.toFixed(1)}h worked`;
+    body = (
+      <>
+        {rows.map(([l, h, r]) => <PayRow key={l} label={l} sub={`${+h.toFixed(2)}h × $${r}`} value={fmtMoney(h * r)} />)}
+        {oc.map(([l, n, r]) => <PayRow key={l} label={l} sub={`${n} × $${r}`} value={fmtMoney(n * r)} />)}
+        {!rows.length && !oc.length && <div style={{ fontSize: 13, color: "var(--muted)", padding: "6px 0" }}>No shifts this period.</div>}
+      </>
+    );
+  } else if (job === "kempsey") {
+    const b = kempseyBreakdown(list);
+    total = b.gross;
+    const rows = [
+      ["Morning (6–10)", b.rates.morning, KEMPSEY_RATES.morning],
+      ["Afternoon (10–1)", b.rates.afternoon10to1, KEMPSEY_RATES.afternoon10to1],
+      ["Afternoon (1–4)", b.rates.afternoon1to4, KEMPSEY_RATES.afternoon1to4],
+      ["Saturday", b.rates.saturday, KEMPSEY_RATES.saturday],
+      ["Sunday", b.rates.sunday, KEMPSEY_RATES.sunday],
+    ].filter(r => r[1] > 0);
+    footerSub = `${+b.hours.toFixed(1)}h worked`;
+    body = (
+      <>
+        {rows.map(([l, h, r]) => <PayRow key={l} label={l} sub={`${+h.toFixed(2)}h × $${r}`} value={fmtMoney(h * r)} />)}
+        {!rows.length && <div style={{ fontSize: 13, color: "var(--muted)", padding: "6px 0" }}>No shifts this period.</div>}
+      </>
+    );
+  } else {
+    total = FT_GROSS;
+    footerSub = `${fmtMoney(FT_NET)} net`;
+    body = (
+      <>
+        <PayRow label="Salary (fixed)" sub="gross per fortnight" value={fmtMoney(FT_GROSS)} />
+        <PayRow label="After tax" sub="take-home" value={fmtMoney(FT_NET)} />
+        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Paid on the alternate week to Aspen.</div>
+      </>
+    );
+  }
+
+  return (
+    <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 14, borderTop: `3px solid ${info.color}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <span style={{ fontSize: 14, fontWeight: 700, color: info.color }}>{info.name}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+          <button onClick={() => setOffset(offset - 1)} style={iconBtnStyle} aria-label="Previous period"><ChevronLeft size={16} /></button>
+          <button onClick={() => setOffset(offset + 1)} disabled={offset >= 0} style={{ ...iconBtnStyle, opacity: offset >= 0 ? 0.3 : 1 }} aria-label="Next period"><ChevronRight size={16} /></button>
+        </div>
+      </div>
+      <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8 }}>
+        {windowLabel(win)}{offset === 0 ? " · current" : ""}
+      </div>
+      {body}
+      <div style={{ borderTop: "1px solid var(--border)", marginTop: 8, paddingTop: 8 }}>
+        <PayRow label="Subtotal" sub={footerSub} value={fmtMoney(total)} bold />
       </div>
     </div>
   );
@@ -778,7 +939,7 @@ export default function ShiftTracker() {
       "--border": "#e5e7eb", "--accent": "#2563eb", "--accent-light": "#dbeafe", "--hover": "#f0f1f3",
       fontFamily: "'Inter', -apple-system, system-ui, sans-serif",
       color: "var(--text)", background: "var(--bg)", minHeight: "100vh", padding: "0 0 80px 0",
-      maxWidth: 520, margin: "0 auto",
+      maxWidth: 960, margin: "0 auto",
     }}>
       {/* Header */}
       <div style={{ padding: "20px 16px 12px", borderBottom: "1px solid var(--border)", background: "var(--surface)" }}>
@@ -853,8 +1014,8 @@ export default function ShiftTracker() {
         {/* Fatigue */}
         <FatigueIndicator shifts={shifts} targetDate={today} />
 
-        {/* Current fortnight summary */}
-        {view !== "pay" && <PaySummaryCard shifts={filtered} fortnightKey={currentFn} />}
+        {/* Current period overall summary (not on Pay tab, which has its own) */}
+        {view !== "pay" && <OverallPayCard shifts={filtered} base={today} />}
 
         {/* Calendar */}
         {view === "calendar" && (
@@ -866,12 +1027,19 @@ export default function ShiftTracker() {
           />
         )}
 
-        {/* Pay view */}
+        {/* Pay view: overall + per-job sections, each on its own cycle */}
         {view === "pay" && (
           <div>
-            <h3 style={{ fontSize: 15, fontWeight: 700, margin: "0 0 12px" }}>Fortnight pay summaries</h3>
-            {fortnights.length === 0 && <div style={{ fontSize: 13, color: "var(--muted)" }}>No shifts recorded yet.</div>}
-            {fortnights.map(fn => <PaySummaryCard key={fn} shifts={filtered} fortnightKey={fn} />)}
+            <OverallPayCard shifts={filtered} base={today} />
+            <h3 style={{ fontSize: 15, fontWeight: 700, margin: "4px 0 10px" }}>By job</h3>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12 }}>
+              <JobPayPanel job="aspen" shifts={filtered} base={today} />
+              <JobPayPanel job="kempsey" shifts={filtered} base={today} />
+              <JobPayPanel job="fulltime" shifts={filtered} base={today} />
+            </div>
+            <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 12 }}>
+              Each job shows its own pay cycle. Use the arrows on a job to step through its past/future periods.
+            </p>
           </div>
         )}
 
