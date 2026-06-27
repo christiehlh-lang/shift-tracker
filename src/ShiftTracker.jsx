@@ -86,30 +86,75 @@ function shiftFortnightKey(s) {
 }
 
 // ─── Per-job pay cycles ───
-// Each job is paid fortnightly but on a different window:
-//   Aspen     — Saturday → Friday
-//   Kempsey   — Monday → Sunday (same cycle, shifted +2 days)
-//   Full-time — opposite/alternate week to Aspen (shifted +7 days)
-const ASPEN_ANCHOR = new Date(2026, 5, 20);   // Sat 20/06/2026
-const KEMPSEY_ANCHOR = new Date(2026, 5, 22); // Mon 22/06/2026
-const FT_ANCHOR = new Date(2026, 5, 27);      // Sat 27/06/2026 (alternate week)
-const JOB_ANCHOR = { aspen: ASPEN_ANCHOR, kempsey: KEMPSEY_ANCHOR, fulltime: FT_ANCHOR };
+// Each job is paid fortnightly. The work period and the actual payday differ:
+//   Aspen     — Sat → Fri,  paid Thursday of the week after the period
+//   Kempsey   — Mon → Sun,  paid Thursday of the week after the period
+//   Full-time — Mon → Fri (2 wks), paid Wednesday of the week after the period
+// payFromMon = days after the Monday of the week following the period end
+// (Wed = 2, Thu = 3).
+const JOB_CYCLE = {
+  aspen:    { anchor: new Date(2026, 5, 20), endOffset: 13, payFromMon: 3 }, // Sat 20/06
+  kempsey:  { anchor: new Date(2026, 5, 22), endOffset: 13, payFromMon: 3 }, // Mon 22/06
+  fulltime: { anchor: new Date(2026, 5, 15), endOffset: 11, payFromMon: 2 }, // Mon 15/06
+};
 
-// The pay window for a job at a given offset (0 = the period containing `base`,
-// -1 = previous, +1 = next).
+// The pay window for a job at a given offset (0 = period containing `base`).
 function payWindow(job, base, offset = 0) {
-  const anchor = JOB_ANCHOR[job];
+  const c = JOB_CYCLE[job];
   const d = base instanceof Date ? base : new Date(base + "T00:00:00");
-  const diff = Math.floor((d - anchor) / 86400000);
+  const diff = Math.floor((d - c.anchor) / 86400000);
   const fn = Math.floor(diff / 14) + offset;
-  const start = new Date(anchor.getTime() + fn * 14 * 86400000);
-  const end = new Date(start.getTime() + 13 * 86400000);
+  const start = new Date(c.anchor.getTime() + fn * 14 * 86400000);
+  const end = new Date(start.getTime() + c.endOffset * 86400000);
   return { start, end };
+}
+
+// The payday for a given pay window: Wed/Thu of the week after the period ends.
+function paydayFor(job, win) {
+  const c = JOB_CYCLE[job];
+  const d = new Date(win.end);
+  const dow = d.getDay(); // 0=Sun..6=Sat
+  const monOffset = dow === 0 ? -6 : 1 - dow; // back to this week's Monday
+  const monNext = new Date(d);
+  monNext.setDate(d.getDate() + monOffset + 7); // Monday of the following week
+  const pay = new Date(monNext);
+  pay.setDate(monNext.getDate() + c.payFromMon);
+  return pay;
 }
 
 function inWindow(dateStr, win) {
   const d = new Date(dateStr + "T00:00:00");
   return d >= win.start && d <= win.end;
+}
+
+function jobGrossInWindow(job, shifts, win) {
+  const list = shifts.filter(s => s.job === job && s.entryType === "shift" && inWindow(s.date, win));
+  if (job === "aspen") return aspenBreakdown(list).gross;
+  if (job === "kempsey") return kempseyBreakdown(list).gross;
+  return FT_GROSS;
+}
+
+// Upcoming paydays across all jobs, soonest first, grouped by date.
+function upcomingPaydays(shifts, base, count = 4) {
+  const today = new Date(base instanceof Date ? base : base + "T00:00:00");
+  today.setHours(0, 0, 0, 0);
+  const entries = [];
+  for (const job of ["aspen", "kempsey", "fulltime"]) {
+    for (let off = -1; off <= 3; off++) {
+      const win = payWindow(job, today, off);
+      const pd = paydayFor(job, win);
+      if (pd >= today) entries.push({ job, win, payday: pd, gross: jobGrossInWindow(job, shifts, win) });
+    }
+  }
+  entries.sort((a, b) => a.payday - b.payday);
+  const groups = [];
+  for (const e of entries) {
+    const key = ymd(e.payday);
+    let g = groups.find(x => x.key === key);
+    if (!g) { g = { key, payday: e.payday, items: [] }; groups.push(g); }
+    if (!g.items.some(it => it.job === e.job)) g.items.push(e);
+  }
+  return groups.slice(0, count);
 }
 
 function windowLabel(win) {
@@ -489,49 +534,88 @@ function PayRow({ label, sub, value, bold }) {
   );
 }
 
-// Combined overview of the current pay period across all three jobs.
-function OverallPayCard({ shifts, base }) {
-  const aWin = payWindow("aspen", base);
-  const kWin = payWindow("kempsey", base);
-  const fWin = payWindow("fulltime", base);
-  const aspen = aspenBreakdown(shifts.filter(s => s.job === "aspen" && s.entryType === "shift" && inWindow(s.date, aWin)));
-  const kempsey = kempseyBreakdown(shifts.filter(s => s.job === "kempsey" && s.entryType === "shift" && inWindow(s.date, kWin)));
+// Upcoming paydays across all jobs — the money actually coming in, soonest first.
+function UpcomingPayCard({ shifts, base }) {
+  const groups = upcomingPaydays(shifts, base, 4);
+  const fmtDay = (d) => d.toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" });
+  const fmtShort = (d) => d.toLocaleDateString("en-AU", { day: "2-digit", month: "short" });
 
-  const variableGross = aspen.gross + kempsey.gross;
-  const totalGross = variableGross + FT_GROSS;
-  const takeHome = estimateTakeHome(variableGross) + FT_NET;
+  const groupTotals = (g) => {
+    let variable = 0, ft = 0;
+    g.items.forEach(it => { if (it.job === "fulltime") ft += FT_GROSS; else variable += it.gross; });
+    const gross = variable + ft;
+    const net = (ft ? FT_NET : 0) + (variable > 0 ? estimateTakeHome(variable) : 0);
+    return { gross, net };
+  };
 
-  const col = (name, color, value, periodWin, sub) => (
-    <div style={{ flex: "1 1 150px", background: "var(--bg)", borderRadius: 8, padding: "10px 12px" }}>
-      <div style={{ fontSize: 11, color, fontWeight: 700 }}>{name}</div>
-      <div style={{ fontSize: 18, fontWeight: 800 }}>{value}</div>
-      {sub && <div style={{ fontSize: 10, color: "var(--muted)" }}>{sub}</div>}
-      <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2 }}>{windowLabel(periodWin)}</div>
-    </div>
-  );
+  if (!groups.length) {
+    return (
+      <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 16 }}>
+        <div style={{ fontSize: 13, fontWeight: 700 }}>Upcoming pay</div>
+        <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 6 }}>No upcoming paydays.</div>
+      </div>
+    );
+  }
+
+  const next = groups[0];
+  const nextT = groupTotals(next);
 
   return (
     <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 16 }}>
-      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>This pay period — overall</div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
-        {col("Aspen", JOBS.aspen.color, fmtMoney(aspen.gross), aWin, `${+aspen.workedHours.toFixed(1)}h worked`)}
-        {col("Kempsey", JOBS.kempsey.color, fmtMoney(kempsey.gross), kWin, `${+kempsey.hours.toFixed(1)}h worked`)}
-        {col("Full-time", JOBS.fulltime.color, fmtMoney(FT_GROSS), fWin, `${fmtMoney(FT_NET)} net`)}
-      </div>
-      <div style={{ borderTop: "1px solid var(--border)", paddingTop: 10, display: "flex", justifyContent: "space-between" }}>
-        <div>
-          <div style={{ fontSize: 12, color: "var(--muted)" }}>Total gross</div>
-          <div style={{ fontSize: 22, fontWeight: 800 }}>{fmtMoney(totalGross)}</div>
-          <div style={{ fontSize: 10, color: "var(--muted)" }}>incl. ${FT_GROSS.toLocaleString()} FT</div>
+      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Upcoming pay</div>
+
+      {/* Next payday — highlighted */}
+      <div style={{ background: "var(--accent-light)", border: `1px solid ${JOBS.aspen.color}33`, borderRadius: 10, padding: 14, marginBottom: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "var(--accent)" }}>NEXT PAY · {fmtDay(next.payday)}</div>
+          <div style={{ fontSize: 11, color: "var(--muted)" }}>{daysUntil(next.payday, base)}</div>
         </div>
-        <div style={{ textAlign: "right" }}>
-          <div style={{ fontSize: 12, color: "var(--muted)" }}>Est. take-home</div>
-          <div style={{ fontSize: 22, fontWeight: 800, color: "var(--accent)" }}>~{fmtMoney(takeHome)}</div>
-          <div style={{ fontSize: 10, color: "var(--muted)" }}>incl. ${FT_NET.toLocaleString()} FT net</div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginTop: 6 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {next.items.map(it => (
+              <span key={it.job} style={{ fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 6, background: JOBS[it.job].light, color: JOBS[it.job].color }}>
+                {JOBS[it.job].name} {fmtMoney(it.job === "fulltime" ? FT_GROSS : it.gross)}
+              </span>
+            ))}
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 22, fontWeight: 800 }}>{fmtMoney(nextT.gross)}</div>
+            <div style={{ fontSize: 11, color: "var(--accent)", fontWeight: 700 }}>~{fmtMoney(nextT.net)} take-home</div>
+          </div>
+        </div>
+        <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 6 }}>
+          for {next.items.map(it => `${JOBS[it.job].name} ${fmtShort(it.win.start)}–${fmtShort(it.win.end)}`).join(" · ")}
         </div>
       </div>
+
+      {/* Following paydays */}
+      {groups.slice(1).map(g => {
+        const t = groupTotals(g);
+        return (
+          <div key={g.key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 4px", borderTop: "1px solid var(--border)" }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>{fmtDay(g.payday)}</div>
+              <div style={{ fontSize: 11, color: "var(--muted)" }}>{g.items.map(it => JOBS[it.job].name).join(" + ")}</div>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontSize: 15, fontWeight: 700 }}>{fmtMoney(t.gross)}</div>
+              <div style={{ fontSize: 10, color: "var(--muted)" }}>~{fmtMoney(t.net)} net</div>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
+}
+
+function daysUntil(d, base) {
+  const today = new Date(base instanceof Date ? base : base + "T00:00:00");
+  today.setHours(0, 0, 0, 0);
+  const days = Math.round((d - today) / 86400000);
+  if (days <= 0) return "today";
+  if (days === 1) return "tomorrow";
+  if (days < 14) return `in ${days} days`;
+  return `in ${Math.round(days / 7)} weeks`;
 }
 
 // One job's pay, with its own cycle navigation and category breakdown.
@@ -606,8 +690,11 @@ function JobPayPanel({ job, shifts, base }) {
           <button onClick={() => setOffset(offset + 1)} disabled={offset >= 0} style={{ ...iconBtnStyle, opacity: offset >= 0 ? 0.3 : 1 }} aria-label="Next period"><ChevronRight size={16} /></button>
         </div>
       </div>
-      <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8 }}>
+      <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>
         {windowLabel(win)}{offset === 0 ? " · current" : ""}
+      </div>
+      <div style={{ fontSize: 11, color: info.color, fontWeight: 600, marginBottom: 8 }}>
+        Pays {paydayFor(job, win).toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" })}
       </div>
       {body}
       <div style={{ borderTop: "1px solid var(--border)", marginTop: 8, paddingTop: 8 }}>
@@ -1015,7 +1102,7 @@ export default function ShiftTracker() {
         <FatigueIndicator shifts={shifts} targetDate={today} />
 
         {/* Current period overall summary (not on Pay tab, which has its own) */}
-        {view !== "pay" && <OverallPayCard shifts={filtered} base={today} />}
+        {view !== "pay" && <UpcomingPayCard shifts={filtered} base={today} />}
 
         {/* Calendar */}
         {view === "calendar" && (
@@ -1030,8 +1117,8 @@ export default function ShiftTracker() {
         {/* Pay view: overall + per-job sections, each on its own cycle */}
         {view === "pay" && (
           <div>
-            <OverallPayCard shifts={filtered} base={today} />
-            <h3 style={{ fontSize: 15, fontWeight: 700, margin: "4px 0 10px" }}>By job</h3>
+            <UpcomingPayCard shifts={filtered} base={today} />
+            <h3 style={{ fontSize: 15, fontWeight: 700, margin: "4px 0 10px" }}>By job — work periods</h3>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12 }}>
               <JobPayPanel job="aspen" shifts={filtered} base={today} />
               <JobPayPanel job="kempsey" shifts={filtered} base={today} />
