@@ -24,7 +24,8 @@ const KEMPSEY_RATES = {
   sunday: 98.35,
 };
 
-// Full-time pay is a fixed TAKE-HOME (after-tax) amount per fortnight.
+// Full-time pay per fortnight: fixed gross and take-home (after-tax) amounts.
+const FT_GROSS = 5068;
 const FT_NET = 3064;
 
 const JOBS = {
@@ -71,6 +72,28 @@ function getFortnightKey(dateStr) {
   const start = new Date(anchor.getTime() + fnNum * 14 * 86400000);
   const end = new Date(start.getTime() + 13 * 86400000);
   return `${start.toISOString().slice(0, 10)}_${end.toISOString().slice(0, 10)}`;
+}
+
+// Kempsey runs on the same fortnightly cycle as Aspen but its weeks are
+// Monday–Sunday (not Saturday–Friday), so its pay fortnight is shifted +2 days:
+// e.g. Aspen Sat 20/06 – Fri 03/07 pairs with Kempsey Mon 22/06 – Sun 05/07.
+function getKempseyWindow(aspenFortnightKey) {
+  const [s] = aspenFortnightKey.split("_");
+  const start = new Date(s + "T00:00:00");
+  start.setDate(start.getDate() + 2); // Saturday -> Monday
+  const end = new Date(start.getTime() + 13 * 86400000);
+  return { start, end };
+}
+
+// The Aspen-fortnight card a shift belongs to. Kempsey dates are shifted back
+// 2 days so a Kempsey shift lands in the same card whose Mon–Sun window covers it.
+function shiftFortnightKey(s) {
+  if (s.job === "kempsey") {
+    const d = new Date(s.date + "T00:00:00");
+    d.setDate(d.getDate() - 2);
+    return getFortnightKey(d);
+  }
+  return getFortnightKey(s.date);
 }
 
 function fortnightLabel(key) {
@@ -365,20 +388,33 @@ function CalendarView({ shifts, year, month, onNav, onDayClick }) {
 }
 
 function PaySummaryCard({ shifts, fortnightKey }) {
-  const fnShifts = shifts.filter(s => getFortnightKey(s.date) === fortnightKey && s.entryType === "shift");
+  // Aspen (and the full-time slot) use this Sat–Fri fortnight.
+  const aspenShifts = shifts.filter(s => s.job === "aspen" && s.entryType === "shift" && getFortnightKey(s.date) === fortnightKey);
+  // Kempsey uses the paired Mon–Sun window (shifted +2 days).
+  const kWin = getKempseyWindow(fortnightKey);
+  const inKempsey = (dateStr) => {
+    const d = new Date(dateStr + "T00:00:00");
+    return d >= kWin.start && d <= kWin.end;
+  };
+  const kempseyShifts = shifts.filter(s => s.job === "kempsey" && s.entryType === "shift" && inKempsey(s.date));
 
   let aspenTotal = 0, kempseyTotal = 0;
   let aspenHrs = 0, kempseyHrs = 0;
 
-  fnShifts.forEach(s => {
-    const pay = calcShiftPay(s);
-    if (s.job === "aspen") { aspenTotal += pay; if (s.shiftType !== "oncall") aspenHrs += parseFloat(s.hours) || 0; }
-    if (s.job === "kempsey") { kempseyTotal += pay; kempseyHrs += parseFloat(s.hours) || 0; }
+  aspenShifts.forEach(s => {
+    aspenTotal += calcShiftPay(s);
+    if (s.shiftType !== "oncall") aspenHrs += parseFloat(s.hours) || 0;
+  });
+  kempseyShifts.forEach(s => {
+    kempseyTotal += calcShiftPay(s);
+    kempseyHrs += parseFloat(s.hours) || 0;
   });
 
-  // Aspen + Kempsey are variable gross; full-time is already after-tax, so it's
-  // added straight to take-home (not run through the gross→net estimator).
+  // Aspen + Kempsey are variable (casual) gross run through the gross→net
+  // estimator; full-time has fixed gross/net, so its net is added straight to
+  // take-home and its gross to the total gross.
   const variableGross = aspenTotal + kempseyTotal;
+  const totalGross = variableGross + FT_GROSS;
   const takeHome = estimateTakeHome(variableGross) + FT_NET;
 
   return (
@@ -394,23 +430,26 @@ function PaySummaryCard({ shifts, fortnightKey }) {
           <div style={{ fontSize: 11, color: JOBS.kempsey.color, fontWeight: 600 }}>Kempsey</div>
           <div style={{ fontSize: 16, fontWeight: 700 }}>{fmtMoney(kempseyTotal)}</div>
           <div style={{ fontSize: 11, color: "var(--muted)" }}>{kempseyHrs}h worked</div>
+          <div style={{ fontSize: 9, color: "var(--muted)" }}>
+            {kWin.start.toLocaleDateString("en-AU", { day: "2-digit", month: "2-digit" })}–{kWin.end.toLocaleDateString("en-AU", { day: "2-digit", month: "2-digit" })}
+          </div>
         </div>
         <div style={{ textAlign: "center" }}>
           <div style={{ fontSize: 11, color: JOBS.fulltime.color, fontWeight: 600 }}>Full-time</div>
-          <div style={{ fontSize: 16, fontWeight: 700 }}>{fmtMoney(FT_NET)}</div>
-          <div style={{ fontSize: 11, color: "var(--muted)" }}>after tax</div>
+          <div style={{ fontSize: 16, fontWeight: 700 }}>{fmtMoney(FT_GROSS)}</div>
+          <div style={{ fontSize: 11, color: "var(--muted)" }}>{fmtMoney(FT_NET)} net</div>
         </div>
       </div>
       <div style={{ borderTop: "1px solid var(--border)", paddingTop: 10, display: "flex", justifyContent: "space-between" }}>
         <div>
-          <div style={{ fontSize: 12, color: "var(--muted)" }}>Variable gross</div>
-          <div style={{ fontSize: 20, fontWeight: 800 }}>{fmtMoney(variableGross)}</div>
-          <div style={{ fontSize: 10, color: "var(--muted)" }}>Aspen + Kempsey</div>
+          <div style={{ fontSize: 12, color: "var(--muted)" }}>Total gross</div>
+          <div style={{ fontSize: 20, fontWeight: 800 }}>{fmtMoney(totalGross)}</div>
+          <div style={{ fontSize: 10, color: "var(--muted)" }}>incl. ${FT_GROSS.toLocaleString()} FT</div>
         </div>
         <div style={{ textAlign: "right" }}>
           <div style={{ fontSize: 12, color: "var(--muted)" }}>Est. take-home</div>
           <div style={{ fontSize: 20, fontWeight: 800, color: "var(--accent)" }}>~{fmtMoney(takeHome)}</div>
-          <div style={{ fontSize: 10, color: "var(--muted)" }}>incl. ${FT_NET.toLocaleString()} FT after tax</div>
+          <div style={{ fontSize: 10, color: "var(--muted)" }}>incl. ${FT_NET.toLocaleString()} FT net</div>
         </div>
       </div>
     </div>
@@ -723,13 +762,13 @@ export default function ShiftTracker() {
   };
 
   const filtered = shifts.filter(s => jobFilter === "all" || s.job === jobFilter);
-  const fortnights = [...new Set(filtered.filter(s => s.entryType === "shift").map(s => getFortnightKey(s.date)))].sort().reverse();
+  const fortnights = [...new Set(filtered.filter(s => s.entryType === "shift").map(shiftFortnightKey))].sort().reverse();
   const today = new Date().toISOString().slice(0, 10);
   const currentFn = getFortnightKey(today);
 
   const selectedShifts = selectedDate
     ? filtered.filter(s => s.date === selectedDate)
-    : filtered.filter(s => getFortnightKey(s.date) === currentFn);
+    : filtered.filter(s => shiftFortnightKey(s) === currentFn);
 
   if (!loaded) return <div style={{ padding: 40, textAlign: "center", color: "var(--muted)" }}>Loading...</div>;
 
