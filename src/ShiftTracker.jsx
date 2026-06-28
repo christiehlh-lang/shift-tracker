@@ -249,8 +249,11 @@ function calcShiftPay(shift) {
   return 0; // Full-time is fixed
 }
 
+// Take-home ≈ 50% of gross + $505 (fits observed Aspen pays within ~$25).
+// Guard small/zero gross so net never exceeds gross or appears out of nowhere.
 function estimateTakeHome(gross) {
-  return Math.round(gross * 0.5 + 505);
+  if (gross <= 0) return 0;
+  return Math.min(gross, Math.round(gross * 0.5 + 505));
 }
 
 // ─── Calendar helpers ───
@@ -534,19 +537,20 @@ function PayRow({ label, sub, value, bold }) {
   );
 }
 
+// Net (after-tax) for a single job's payday.
+function itemNet(it) {
+  return it.job === "fulltime" ? FT_NET : estimateTakeHome(it.gross);
+}
+function itemGross(it) {
+  return it.job === "fulltime" ? FT_GROSS : it.gross;
+}
+
 // Upcoming paydays across all jobs — the money actually coming in, soonest first.
+// Each job is shown separately with its own gross and after-tax (take-home).
 function UpcomingPayCard({ shifts, base }) {
   const groups = upcomingPaydays(shifts, base, 4);
   const fmtDay = (d) => d.toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" });
   const fmtShort = (d) => d.toLocaleDateString("en-AU", { day: "2-digit", month: "short" });
-
-  const groupTotals = (g) => {
-    let variable = 0, ft = 0;
-    g.items.forEach(it => { if (it.job === "fulltime") ft += FT_GROSS; else variable += it.gross; });
-    const gross = variable + ft;
-    const net = (ft ? FT_NET : 0) + (variable > 0 ? estimateTakeHome(variable) : 0);
-    return { gross, net };
-  };
 
   if (!groups.length) {
     return (
@@ -558,52 +562,50 @@ function UpcomingPayCard({ shifts, base }) {
   }
 
   const next = groups[0];
-  const nextT = groupTotals(next);
 
   return (
     <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 16 }}>
       <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Upcoming pay</div>
 
-      {/* Next payday — highlighted */}
+      {/* Next payday — highlighted, take-home prominent */}
       <div style={{ background: "var(--accent-light)", border: `1px solid ${JOBS.aspen.color}33`, borderRadius: 10, padding: 14, marginBottom: 12 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: "var(--accent)" }}>NEXT PAY · {fmtDay(next.payday)}</div>
           <div style={{ fontSize: 11, color: "var(--muted)" }}>{daysUntil(next.payday, base)}</div>
         </div>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginTop: 6 }}>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {next.items.map(it => (
-              <span key={it.job} style={{ fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 6, background: JOBS[it.job].light, color: JOBS[it.job].color }}>
-                {JOBS[it.job].name} {fmtMoney(it.job === "fulltime" ? FT_GROSS : it.gross)}
-              </span>
-            ))}
-          </div>
-          <div style={{ textAlign: "right" }}>
-            <div style={{ fontSize: 22, fontWeight: 800 }}>{fmtMoney(nextT.gross)}</div>
-            <div style={{ fontSize: 11, color: "var(--accent)", fontWeight: 700 }}>~{fmtMoney(nextT.net)} take-home</div>
-          </div>
-        </div>
-        <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 6 }}>
-          for {next.items.map(it => `${JOBS[it.job].name} ${fmtShort(it.win.start)}–${fmtShort(it.win.end)}`).join(" · ")}
-        </div>
-      </div>
-
-      {/* Following paydays */}
-      {groups.slice(1).map(g => {
-        const t = groupTotals(g);
-        return (
-          <div key={g.key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 4px", borderTop: "1px solid var(--border)" }}>
+        {next.items.map(it => (
+          <div key={it.job} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0" }}>
             <div>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>{fmtDay(g.payday)}</div>
-              <div style={{ fontSize: 11, color: "var(--muted)" }}>{g.items.map(it => JOBS[it.job].name).join(" + ")}</div>
+              <span style={{ fontSize: 12, fontWeight: 700, padding: "2px 8px", borderRadius: 6, background: JOBS[it.job].light, color: JOBS[it.job].color }}>{JOBS[it.job].name}</span>
+              <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 4 }}>{fmtShort(it.win.start)}–{fmtShort(it.win.end)}</div>
             </div>
             <div style={{ textAlign: "right" }}>
-              <div style={{ fontSize: 15, fontWeight: 700 }}>{fmtMoney(t.gross)}</div>
-              <div style={{ fontSize: 10, color: "var(--muted)" }}>~{fmtMoney(t.net)} net</div>
+              <div style={{ fontSize: 28, fontWeight: 800, color: "var(--accent)", lineHeight: 1.05 }}>~{fmtMoney(itemNet(it))}</div>
+              <div style={{ fontSize: 12, color: "var(--muted)" }}>take-home · {fmtMoney(itemGross(it))} gross</div>
             </div>
           </div>
-        );
-      })}
+        ))}
+      </div>
+
+      {/* Following paydays — one row per job */}
+      {groups.slice(1).map(g => (
+        <div key={g.key}>
+          {g.items.map((it, idx) => (
+            <div key={it.job} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 4px", borderTop: "1px solid var(--border)" }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>
+                  {idx === 0 ? fmtDay(g.payday) : <span style={{ color: "transparent" }}>{fmtDay(g.payday)}</span>}
+                </div>
+                <div style={{ fontSize: 11, color: JOBS[it.job].color, fontWeight: 600 }}>{JOBS[it.job].name}</div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 18, fontWeight: 800 }}>~{fmtMoney(itemNet(it))}</div>
+                <div style={{ fontSize: 10, color: "var(--muted)" }}>take-home · {fmtMoney(itemGross(it))} gross</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      ))}
     </div>
   );
 }
