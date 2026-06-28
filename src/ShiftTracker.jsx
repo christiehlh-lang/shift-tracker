@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { Calendar, DollarSign, Plus, Trash2, ChevronLeft, ChevronRight, X, AlertTriangle, FileText, Edit3, Upload, Check } from "lucide-react";
 import { parseAspenPdf } from "./aspenPdf";
+import { parseFulltimePdf, detectPdfKind } from "./fulltimePdf";
 
 // ─── Pay rate configs ───
 const ASPEN_RATES = {
@@ -794,7 +795,7 @@ const fieldGroup = { marginBottom: 12 };
 const labelStyle = { display: "block", fontSize: 12, fontWeight: 600, color: "var(--muted)", marginBottom: 4 };
 const inputStyle = { width: "100%", padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 6, fontSize: 14, background: "var(--bg)", color: "var(--text)", boxSizing: "border-box" };
 
-function ImportOverlay({ state, onConfirm, onClose, existing }) {
+function ImportOverlay({ state, onConfirm, onConfirmFt, onClose, existing }) {
   const overlay = {
     position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 200,
     display: "flex", alignItems: "flex-end", justifyContent: "center",
@@ -820,8 +821,45 @@ function ImportOverlay({ state, onConfirm, onClose, existing }) {
         <div style={sheet} onClick={e => e.stopPropagation()}>
           {header("Import failed")}
           <div style={{ fontSize: 14, color: "#dc2626", marginBottom: 16 }}>{state.error}</div>
-          <div style={{ fontSize: 13, color: "var(--muted)" }}>Make sure it's an Aspen Medical “Individual Schedule” roster PDF with the bold pay-period date range at the top.</div>
+          <div style={{ fontSize: 13, color: "var(--muted)" }}>Upload an Aspen Medical “Individual Schedule” roster PDF, or a full-time Outlook weekly calendar PDF.</div>
           <button onClick={onClose} style={{ ...primaryBtn, width: "100%", marginTop: 16 }}>Close</button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Full-time meetings import ──
+  if (state.ft) {
+    const meetings = state.ft.meetings;
+    const have = new Set(existing.map(s => `${s.date}|${s.startTime || ""}|${s.entryType}|${s.notes || ""}`));
+    const newCount = meetings.filter(m => {
+      const notes = m.teams ? `${m.title} (Teams)` : m.title;
+      return !have.has(`${m.date}|${m.start}|meeting|${notes}`);
+    }).length;
+    const byDay = {};
+    meetings.forEach(m => { (byDay[m.date] = byDay[m.date] || []).push(m); });
+    const dayLabel = (ds) => new Date(ds + "T00:00:00").toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" });
+    return (
+      <div style={overlay} onClick={onClose}>
+        <div style={sheet} onClick={e => e.stopPropagation()}>
+          {header("Review full-time meetings")}
+          {!meetings.length && <div style={{ fontSize: 13, color: "var(--muted)" }}>No meetings found in this PDF.</div>}
+          {Object.keys(byDay).sort().map(ds => (
+            <div key={ds} style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: JOBS.fulltime.color, marginBottom: 4 }}>{dayLabel(ds)}</div>
+              {byDay[ds].map((m, i) => (
+                <div key={i} style={{ display: "flex", gap: 10, fontSize: 13, padding: "5px 10px", background: "var(--bg)", borderRadius: 6, marginBottom: 3 }}>
+                  <span style={{ width: 96, color: "var(--muted)", flexShrink: 0 }}>{m.start}–{m.end}</span>
+                  <span style={{ flex: 1, fontWeight: 600 }}>{m.title}{m.teams && <span style={{ fontSize: 10, marginLeft: 6, padding: "1px 6px", borderRadius: 4, background: "#ede9fe", color: "#6d28d9" }}>Teams</span>}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+          <button onClick={onConfirmFt} disabled={newCount === 0}
+            style={{ ...primaryBtn, width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, opacity: newCount === 0 ? 0.5 : 1, marginTop: 4 }}>
+            <Check size={16} />
+            {newCount === 0 ? "Already imported" : `Add ${newCount} meeting${newCount === 1 ? "" : "s"}`}
+          </button>
         </div>
       </div>
     );
@@ -952,14 +990,47 @@ export default function ShiftTracker() {
     if (!file) return;
     setImportState({ loading: true });
     try {
-      const buf = await file.arrayBuffer();
-      const result = await parseAspenPdf(new Uint8Array(buf));
-      setImportState({ result });
+      const buf = new Uint8Array(await file.arrayBuffer());
+      const kind = await detectPdfKind(buf.slice());
+      if (kind === "fulltime") {
+        const ft = await parseFulltimePdf(buf.slice());
+        setImportState({ ft });
+      } else {
+        const result = await parseAspenPdf(buf.slice());
+        setImportState({ result });
+      }
     } catch (e) {
       console.error("PDF import failed:", e);
       setImportState({ error: e.message || "Could not read this PDF." });
     }
     if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const confirmFtImport = () => {
+    const { ft } = importState;
+    setShifts(prev => {
+      const have = new Set(prev.map(s => `${s.date}|${s.startTime || ""}|${s.entryType}|${s.notes || ""}`));
+      const additions = [];
+      ft.meetings.forEach((m, i) => {
+        const notes = m.teams ? `${m.title} (Teams)` : m.title;
+        const key = `${m.date}|${m.start}|meeting|${notes}`;
+        if (have.has(key)) return;
+        have.add(key);
+        additions.push({
+          id: `ft_${Date.now()}_${i}`,
+          job: "fulltime",
+          date: m.date,
+          entryType: "meeting",
+          shiftType: "clinical",
+          hours: 0, ordinaryHours: 0, eveningHours: 0,
+          isPublicHoliday: false, kempseyRate: "morning",
+          startTime: m.start, endTime: m.end,
+          notes,
+        });
+      });
+      return [...prev, ...additions];
+    });
+    setImportState(null);
   };
 
   const confirmImport = () => {
@@ -1041,7 +1112,7 @@ export default function ShiftTracker() {
             onClick={() => fileInputRef.current && fileInputRef.current.click()}
             style={{ ...tagBtn, display: "flex", alignItems: "center", gap: 6, background: JOBS.aspen.color, color: "#fff", borderColor: JOBS.aspen.color, flexShrink: 0 }}
           >
-            <Upload size={14} /> Import Aspen PDF
+            <Upload size={14} /> Import PDF
           </button>
         </div>
         <input
@@ -1058,6 +1129,7 @@ export default function ShiftTracker() {
         <ImportOverlay
           state={importState}
           onConfirm={confirmImport}
+          onConfirmFt={confirmFtImport}
           onClose={() => setImportState(null)}
           existing={shifts}
         />

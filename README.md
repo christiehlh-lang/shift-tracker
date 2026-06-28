@@ -15,6 +15,11 @@ fortnightly pay summaries, and a fatigue-load indicator.
   OcH OC on-call), splits weekday hours into ordinary/evening, and shows a review sheet
   with the computed gross before adding them. AV / DO / CS / CS24 (safety check) / SA
   are ignored. Parsing runs entirely in the browser (pdf.js) — nothing is uploaded.
+- **Import full-time calendar PDF** — upload an Outlook weekly calendar export and the
+  app extracts each meeting (day, start/end time, title, Teams flag) by rendering the
+  page and detecting the event boxes, adding them as full-time meetings on the planner.
+  The same Import button auto-detects whether the PDF is an Aspen roster or a full-time
+  calendar. Parsing runs entirely in the browser.
 - **Add / edit entries** — shifts, meetings, or notes with job, date, times, hours and notes.
 - **Award-rate engine** — Aspen (ordinary/evening/weekend/PH/on-call/called-in) and
   Kempsey ED (morning/afternoon/weekend) rates, computed automatically.
