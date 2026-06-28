@@ -30,9 +30,9 @@ const FT_GROSS = 5068;
 const FT_NET = 3064;
 
 const JOBS = {
-  aspen: { name: "Aspen", color: "#2563eb", light: "#dbeafe" },
-  kempsey: { name: "Kempsey ED", color: "#059669", light: "#d1fae5" },
-  fulltime: { name: "Full-time", color: "#7c3aed", light: "#ede9fe" },
+  aspen: { name: "Aspen", color: "#F37221", light: "#fce3cc" },
+  kempsey: { name: "Kempsey ED", color: "#0A654A", light: "#d4f0b6" },
+  fulltime: { name: "Full-time", color: "#CD70AD", light: "#f6e1ef" },
 };
 
 // ─── Helpers ───
@@ -51,8 +51,18 @@ async function saveData(key, val) {
   } catch (e) { console.error("Save failed:", e); }
 }
 
+// Today's date as YYYY-MM-DD in Sydney (AEST/AEDT), independent of the
+// viewing device's own timezone.
+function todaySydney() {
+  const parts = new Intl.DateTimeFormat("en-AU", {
+    timeZone: "Australia/Sydney", year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(new Date());
+  const get = (t) => parts.find((p) => p.type === t).value;
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
 function fmtDate(d) {
-  return new Date(d).toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" });
+  return new Date(d).toLocaleDateString("en-AU", { timeZone: "Australia/Sydney", weekday: "short", day: "numeric", month: "short" });
 }
 
 function fmtMoney(n) {
@@ -72,7 +82,7 @@ function getFortnightKey(dateStr) {
   const fnNum = Math.floor(diff / 14);
   const start = new Date(anchor.getTime() + fnNum * 14 * 86400000);
   const end = new Date(start.getTime() + 13 * 86400000);
-  return `${start.toISOString().slice(0, 10)}_${end.toISOString().slice(0, 10)}`;
+  return `${ymd(start)}_${ymd(end)}`;
 }
 
 // The Aspen-fortnight card a shift belongs to. Kempsey dates are shifted back
@@ -159,7 +169,7 @@ function upcomingPaydays(shifts, base, count = 4) {
 }
 
 function windowLabel(win) {
-  const fmt = (d) => d.toLocaleDateString("en-AU", { weekday: "short", day: "2-digit", month: "short" });
+  const fmt = (d) => d.toLocaleDateString("en-AU", { timeZone: "Australia/Sydney", weekday: "short", day: "2-digit", month: "short" });
   return `${fmt(win.start)} – ${fmt(win.end)}`;
 }
 
@@ -281,7 +291,7 @@ function ymd(d) {
 
 function ShiftForm({ onSave, editShift, onCancel }) {
   const [job, setJob] = useState(editShift?.job || "aspen");
-  const [date, setDate] = useState(editShift?.date || new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(editShift?.date || todaySydney());
   const [hours, setHours] = useState(editShift?.hours || "");
   const [ordinaryHours, setOrdinaryHours] = useState(editShift?.ordinaryHours || "");
   const [eveningHours, setEveningHours] = useState(editShift?.eveningHours || "");
@@ -455,7 +465,7 @@ function entryChipColors(s) {
 
 function CalendarView({ shifts, year, month, onNav, onDayClick }) {
   const days = getMonthDays(year, month);
-  const monthLabel = new Date(year, month).toLocaleDateString("en-AU", { month: "long", year: "numeric" });
+  const monthLabel = new Date(year, month).toLocaleDateString("en-AU", { timeZone: "Australia/Sydney", month: "long", year: "numeric" });
 
   const shiftsForDay = (d) => {
     if (!d) return [];
@@ -478,7 +488,7 @@ function CalendarView({ shifts, year, month, onNav, onDayClick }) {
         ))}
         {days.map((d, i) => {
           const dayShifts = shiftsForDay(d);
-          const isToday = d && toDateStr(year, month, d) === new Date().toISOString().slice(0, 10);
+          const isToday = d && toDateStr(year, month, d) === todaySydney();
           return (
             <div key={i}
               onClick={() => d && onDayClick(toDateStr(year, month, d))}
@@ -550,8 +560,8 @@ function itemGross(it) {
 // Each job is shown separately with its own gross and after-tax (take-home).
 function UpcomingPayCard({ shifts, base }) {
   const groups = upcomingPaydays(shifts, base, 4);
-  const fmtDay = (d) => d.toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" });
-  const fmtShort = (d) => d.toLocaleDateString("en-AU", { day: "2-digit", month: "short" });
+  const fmtDay = (d) => d.toLocaleDateString("en-AU", { timeZone: "Australia/Sydney", weekday: "short", day: "numeric", month: "short" });
+  const fmtShort = (d) => d.toLocaleDateString("en-AU", { timeZone: "Australia/Sydney", day: "2-digit", month: "short" });
 
   if (!groups.length) {
     return (
@@ -697,7 +707,7 @@ function JobPayPanel({ job, shifts, base }) {
         {windowLabel(win)}{offset === 0 ? " · current" : ""}
       </div>
       <div style={{ fontSize: 11, color: info.color, fontWeight: 600, marginBottom: 8 }}>
-        Pays {paydayFor(job, win).toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" })}
+        Pays {paydayFor(job, win).toLocaleDateString("en-AU", { timeZone: "Australia/Sydney", weekday: "short", day: "numeric", month: "short" })}
       </div>
       {body}
       <div style={{ borderTop: "1px solid var(--border)", marginTop: 8, paddingTop: 8 }}>
@@ -709,7 +719,7 @@ function JobPayPanel({ job, shifts, base }) {
 
 function FatigueIndicator({ shifts, targetDate }) {
   // Check hours in 7 days before and including target
-  const target = new Date(targetDate);
+  const target = new Date(targetDate + "T00:00:00");
   let totalHrs = 0;
   let consecutiveDays = 0;
   const jobs = new Set();
@@ -717,7 +727,7 @@ function FatigueIndicator({ shifts, targetDate }) {
   for (let i = 0; i < 7; i++) {
     const d = new Date(target);
     d.setDate(d.getDate() - i);
-    const ds = d.toISOString().slice(0, 10);
+    const ds = ymd(d);
     const dayShifts = shifts.filter(s => s.date === ds && s.entryType === "shift");
     const dayHrs = dayShifts.reduce((sum, s) => sum + (parseFloat(s.hours) || 0), 0);
     totalHrs += dayHrs;
@@ -838,7 +848,7 @@ function ImportOverlay({ state, onConfirm, onConfirmFt, onClose, existing }) {
     }).length;
     const byDay = {};
     meetings.forEach(m => { (byDay[m.date] = byDay[m.date] || []).push(m); });
-    const dayLabel = (ds) => new Date(ds + "T00:00:00").toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" });
+    const dayLabel = (ds) => new Date(ds + "T00:00:00").toLocaleDateString("en-AU", { timeZone: "Australia/Sydney", weekday: "short", day: "numeric", month: "short" });
     return (
       <div style={overlay} onClick={onClose}>
         <div style={sheet} onClick={e => e.stopPropagation()}>
@@ -868,7 +878,7 @@ function ImportOverlay({ state, onConfirm, onConfirmFt, onClose, existing }) {
   const { result } = state;
   const { fortnightStart, fortnightEnd, shifts, summary } = result;
   const { cat, oncall, workedHours, gross } = summary;
-  const fmtR = (d) => d.toLocaleDateString("en-AU", { day: "2-digit", month: "2-digit" });
+  const fmtR = (d) => d.toLocaleDateString("en-AU", { timeZone: "Australia/Sydney", day: "2-digit", month: "2-digit" });
 
   // How many are new vs already imported.
   const have = new Set(existing.map(s => `${s.date}|${s.startTime || ""}|${s.shiftType}|${s.notes || ""}`));
@@ -954,8 +964,8 @@ export default function ShiftTracker() {
   const [view, setView] = useState("calendar"); // calendar | pay | list
   const [showForm, setShowForm] = useState(false);
   const [editShift, setEditShift] = useState(null);
-  const [calYear, setCalYear] = useState(new Date().getFullYear());
-  const [calMonth, setCalMonth] = useState(new Date().getMonth());
+  const [calYear, setCalYear] = useState(+todaySydney().slice(0, 4));
+  const [calMonth, setCalMonth] = useState(+todaySydney().slice(5, 7) - 1);
   const [selectedDate, setSelectedDate] = useState(null);
   const [jobFilter, setJobFilter] = useState("all");
   const [importState, setImportState] = useState(null); // { loading } | { result } | { error }
@@ -1084,7 +1094,7 @@ export default function ShiftTracker() {
 
   const filtered = shifts.filter(s => jobFilter === "all" || s.job === jobFilter);
   const fortnights = [...new Set(filtered.filter(s => s.entryType === "shift").map(shiftFortnightKey))].sort().reverse();
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todaySydney();
   const currentFn = getFortnightKey(today);
 
   const selectedShifts = selectedDate
@@ -1095,8 +1105,8 @@ export default function ShiftTracker() {
 
   return (
     <div style={{
-      "--bg": "#f8f9fb", "--surface": "#ffffff", "--text": "#1a1a2e", "--muted": "#6b7280",
-      "--border": "#e5e7eb", "--accent": "#2563eb", "--accent-light": "#dbeafe", "--hover": "#f0f1f3",
+      "--bg": "#f8faf4", "--surface": "#ffffff", "--text": "#0a0a0a", "--muted": "#6b7563",
+      "--border": "#e3e8dc", "--accent": "#0a654a", "--accent-light": "#d4f0b6", "--hover": "#eef3e6",
       fontFamily: "'Inter', -apple-system, system-ui, sans-serif",
       color: "var(--text)", background: "var(--bg)", minHeight: "100vh", padding: "0 0 80px 0",
       maxWidth: 960, margin: "0 auto",
