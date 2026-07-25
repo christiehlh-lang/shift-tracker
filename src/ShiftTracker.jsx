@@ -1,33 +1,47 @@
 import { useState, useEffect, useRef } from "react";
-import { Calendar, DollarSign, Plus, Trash2, ChevronLeft, ChevronRight, X, AlertTriangle, FileText, Edit3, Upload, Check } from "lucide-react";
+import { Calendar, DollarSign, Plus, Trash2, ChevronLeft, ChevronRight, X, AlertTriangle, FileText, Edit3, Upload, Check, Settings } from "lucide-react";
 import { parseAspenPdf } from "./aspenPdf";
 import { parseFulltimePdf, detectPdfKind } from "./fulltimePdf";
 
-// ─── Pay rate configs ───
-const ASPEN_RATES = {
-  ordinary: 52.50,
-  evening: 60.38,
-  saturday: 78.70,
-  sunday: 91.80,
-  publicHoliday: 105.00,
-  onCallMF: 50.00,
-  onCallSat: 80.00,
-  onCallSunPH: 110.00,
-  calledIn15: 78.00,
-  calledIn2: 105.00,
+// ─── Default pay rates (editable in Rates tab) ───
+const DEFAULT_RATES = {
+  aspen: {
+    ordinary: 52.50, evening: 60.38, saturday: 78.70, sunday: 91.80,
+    publicHoliday: 105.00, onCallMF: 50.00, onCallSat: 80.00, onCallSunPH: 110.00,
+    calledIn15: 78.00, calledIn2: 105.00,
+  },
+  kempsey: {
+    morning: 61.82, afternoon10to1: 67.44, afternoon1to4: 68.84,
+    saturday: 84.30, sunday: 98.35,
+  },
+  fulltime: { gross: 5068, net: 3064 },
 };
 
-const KEMPSEY_RATES = {
-  morning: 61.82,
-  afternoon10to1: 67.44,
-  afternoon1to4: 68.84,
-  saturday: 84.30,
-  sunday: 98.35,
+const RATE_LABELS = {
+  aspen: [
+    { key: "ordinary", label: "Ordinary (07-15)", unit: "/hr" },
+    { key: "evening", label: "Evening (15-07)", unit: "/hr" },
+    { key: "saturday", label: "Saturday", unit: "/hr" },
+    { key: "sunday", label: "Sunday", unit: "/hr" },
+    { key: "publicHoliday", label: "Public Holiday", unit: "/hr" },
+    { key: "onCallMF", label: "On-call Mon-Fri", unit: "flat" },
+    { key: "onCallSat", label: "On-call Sat", unit: "flat" },
+    { key: "onCallSunPH", label: "On-call Sun/PH", unit: "flat" },
+    { key: "calledIn15", label: "Called-in 1.5x", unit: "/hr" },
+    { key: "calledIn2", label: "Called-in 2x", unit: "/hr" },
+  ],
+  kempsey: [
+    { key: "morning", label: "Morning (6am-10am)", unit: "/hr" },
+    { key: "afternoon10to1", label: "Afternoon (10am-1pm)", unit: "/hr" },
+    { key: "afternoon1to4", label: "Afternoon (1pm-4pm)", unit: "/hr" },
+    { key: "saturday", label: "Saturday", unit: "/hr" },
+    { key: "sunday", label: "Sunday", unit: "/hr" },
+  ],
+  fulltime: [
+    { key: "gross", label: "Gross per fortnight", unit: "" },
+    { key: "net", label: "Net per fortnight", unit: "" },
+  ],
 };
-
-// Full-time pay per fortnight: fixed gross and take-home (after-tax) amounts.
-const FT_GROSS = 5068;
-const FT_NET = 3064;
 
 const JOBS = {
   aspen: { name: "Aspen", color: "#F37221", light: "#fce3cc" },
@@ -35,7 +49,7 @@ const JOBS = {
   fulltime: { name: "Full-time", color: "#CD70AD", light: "#f6e1ef" },
 };
 
-// ─── Helpers ───
+// ─── Storage helpers ───
 function getStorageKey(k) { return `shifttracker_${k}`; }
 
 async function loadData(key, fallback) {
@@ -51,8 +65,16 @@ async function saveData(key, val) {
   } catch (e) { console.error("Save failed:", e); }
 }
 
-// Today's date as YYYY-MM-DD in Sydney (AEST/AEDT), independent of the
-// viewing device's own timezone.
+function mergeRates(stored) {
+  if (!stored) return { ...DEFAULT_RATES };
+  return {
+    aspen: { ...DEFAULT_RATES.aspen, ...(stored.aspen || {}) },
+    kempsey: { ...DEFAULT_RATES.kempsey, ...(stored.kempsey || {}) },
+    fulltime: { ...DEFAULT_RATES.fulltime, ...(stored.fulltime || {}) },
+  };
+}
+
+// ─── Date helpers ───
 function todaySydney() {
   const parts = new Intl.DateTimeFormat("en-AU", {
     timeZone: "Australia/Sydney", year: "numeric", month: "2-digit", day: "2-digit",
@@ -70,12 +92,10 @@ function fmtMoney(n) {
 }
 
 function getDayOfWeek(dateStr) {
-  return new Date(dateStr).getDay(); // 0=Sun, 6=Sat
+  return new Date(dateStr).getDay();
 }
 
 function getFortnightKey(dateStr) {
-  // Anchor: 20/06/2026 is a known Aspen pay-fortnight start (Saturday).
-  // Aspen fortnights run Saturday → Friday (14 days).
   const anchor = new Date(2026, 5, 20);
   const d = new Date(dateStr);
   const diff = Math.floor((d - anchor) / (1000 * 60 * 60 * 24));
@@ -85,8 +105,6 @@ function getFortnightKey(dateStr) {
   return `${ymd(start)}_${ymd(end)}`;
 }
 
-// The Aspen-fortnight card a shift belongs to. Kempsey dates are shifted back
-// 2 days so a Kempsey shift lands in the same card whose Mon–Sun window covers it.
 function shiftFortnightKey(s) {
   if (s.job === "kempsey") {
     const d = new Date(s.date + "T00:00:00");
@@ -96,20 +114,13 @@ function shiftFortnightKey(s) {
   return getFortnightKey(s.date);
 }
 
-// ─── Per-job pay cycles ───
-// Each job is paid fortnightly. The work period and the actual payday differ:
-//   Aspen     — Sat → Fri,  paid Thursday of the week after the period
-//   Kempsey   — Mon → Sun,  paid Thursday of the week after the period
-//   Full-time — Mon → Fri (2 wks), paid Wednesday of the week after the period
-// payFromMon = days after the Monday of the week following the period end
-// (Wed = 2, Thu = 3).
+// ─── Pay cycle helpers ───
 const JOB_CYCLE = {
-  aspen:    { anchor: new Date(2026, 5, 20), endOffset: 13, payFromMon: 3 }, // Sat 20/06
-  kempsey:  { anchor: new Date(2026, 5, 22), endOffset: 13, payFromMon: 3 }, // Mon 22/06
-  fulltime: { anchor: new Date(2026, 5, 15), endOffset: 11, payFromMon: 2 }, // Mon 15/06
+  aspen:    { anchor: new Date(2026, 5, 20), endOffset: 13, payFromMon: 3 },
+  kempsey:  { anchor: new Date(2026, 5, 22), endOffset: 13, payFromMon: 3 },
+  fulltime: { anchor: new Date(2026, 5, 15), endOffset: 11, payFromMon: 2 },
 };
 
-// The pay window for a job at a given offset (0 = period containing `base`).
 function payWindow(job, base, offset = 0) {
   const c = JOB_CYCLE[job];
   const d = base instanceof Date ? base : new Date(base + "T00:00:00");
@@ -120,14 +131,13 @@ function payWindow(job, base, offset = 0) {
   return { start, end };
 }
 
-// The payday for a given pay window: Wed/Thu of the week after the period ends.
 function paydayFor(job, win) {
   const c = JOB_CYCLE[job];
   const d = new Date(win.end);
-  const dow = d.getDay(); // 0=Sun..6=Sat
-  const monOffset = dow === 0 ? -6 : 1 - dow; // back to this week's Monday
+  const dow = d.getDay();
+  const monOffset = dow === 0 ? -6 : 1 - dow;
   const monNext = new Date(d);
-  monNext.setDate(d.getDate() + monOffset + 7); // Monday of the following week
+  monNext.setDate(d.getDate() + monOffset + 7);
   const pay = new Date(monNext);
   pay.setDate(monNext.getDate() + c.payFromMon);
   return pay;
@@ -138,49 +148,63 @@ function inWindow(dateStr, win) {
   return d >= win.start && d <= win.end;
 }
 
-function jobGrossInWindow(job, shifts, win) {
-  const list = shifts.filter(s => s.job === job && s.entryType === "shift" && inWindow(s.date, win));
-  if (job === "aspen") return aspenBreakdown(list).gross;
-  if (job === "kempsey") return kempseyBreakdown(list).gross;
-  return FT_GROSS;
-}
-
-// Upcoming paydays across all jobs, soonest first, grouped by date.
-function upcomingPaydays(shifts, base, count = 4) {
-  const today = new Date(base instanceof Date ? base : base + "T00:00:00");
-  today.setHours(0, 0, 0, 0);
-  const entries = [];
-  for (const job of ["aspen", "kempsey", "fulltime"]) {
-    for (let off = -1; off <= 3; off++) {
-      const win = payWindow(job, today, off);
-      const pd = paydayFor(job, win);
-      if (pd >= today) entries.push({ job, win, payday: pd, gross: jobGrossInWindow(job, shifts, win) });
-    }
-  }
-  entries.sort((a, b) => a.payday - b.payday);
-  const groups = [];
-  for (const e of entries) {
-    const key = ymd(e.payday);
-    let g = groups.find(x => x.key === key);
-    if (!g) { g = { key, payday: e.payday, items: [] }; groups.push(g); }
-    if (!g.items.some(it => it.job === e.job)) g.items.push(e);
-  }
-  return groups.slice(0, count);
-}
-
 function windowLabel(win) {
   const fmt = (d) => d.toLocaleDateString("en-AU", { timeZone: "Australia/Sydney", weekday: "short", day: "2-digit", month: "short" });
   return `${fmt(win.start)} – ${fmt(win.end)}`;
 }
 
-// ─── Pay breakdowns from stored shift objects ───
-function aspenBreakdown(list) {
+// ─── Pay calculations (accept rates parameter) ───
+function calcAspenPay(shift, rates) {
+  const R = rates.aspen;
+  const dow = getDayOfWeek(shift.date);
+  const hours = parseFloat(shift.hours) || 0;
+  if (shift.shiftType === "oncall") {
+    if (dow === 0 || shift.isPublicHoliday) return R.onCallSunPH;
+    if (dow === 6) return R.onCallSat;
+    return R.onCallMF;
+  }
+  if (shift.shiftType === "calledin15") return hours * R.calledIn15;
+  if (shift.shiftType === "calledin2") return hours * R.calledIn2;
+  if (shift.isPublicHoliday) return hours * R.publicHoliday;
+  if (dow === 0) return hours * R.sunday;
+  if (dow === 6) return hours * R.saturday;
+  const ordHrs = parseFloat(shift.ordinaryHours) || 0;
+  const eveHrs = parseFloat(shift.eveningHours) || 0;
+  if (ordHrs || eveHrs) return ordHrs * R.ordinary + eveHrs * R.evening;
+  return hours * R.ordinary;
+}
+
+function calcKempseyPay(shift, rates) {
+  const R = rates.kempsey;
+  const dow = getDayOfWeek(shift.date);
+  const hours = parseFloat(shift.hours) || 0;
+  if (dow === 0) return hours * R.sunday;
+  if (dow === 6) return hours * R.saturday;
+  if (shift.kempseyRate === "afternoon10to1") return hours * R.afternoon10to1;
+  if (shift.kempseyRate === "afternoon1to4") return hours * R.afternoon1to4;
+  return hours * R.morning;
+}
+
+function calcShiftPay(shift, rates) {
+  if (shift.job === "aspen") return calcAspenPay(shift, rates);
+  if (shift.job === "kempsey") return calcKempseyPay(shift, rates);
+  return 0;
+}
+
+function estimateTakeHome(gross) {
+  if (gross <= 0) return 0;
+  return Math.min(gross, Math.round(gross * 0.5 + 505));
+}
+
+// ─── Pay breakdowns ───
+function aspenBreakdown(list, rates) {
+  const R = rates.aspen;
   const cats = { ordinary: 0, evening: 0, saturday: 0, sunday: 0, publicHoliday: 0 };
   const oncall = { mf: 0, sat: 0, sunph: 0 };
   const calledin = { h15: 0, h2: 0 };
   let gross = 0, workedHours = 0;
   list.forEach(s => {
-    gross += calcShiftPay(s);
+    gross += calcShiftPay(s, rates);
     const dow = getDayOfWeek(s.date);
     const hours = parseFloat(s.hours) || 0;
     if (s.shiftType === "oncall") {
@@ -203,77 +227,65 @@ function aspenBreakdown(list) {
   return { cats, oncall, calledin, gross, workedHours };
 }
 
-function kempseyBreakdown(list) {
-  const rates = { morning: 0, afternoon10to1: 0, afternoon1to4: 0, saturday: 0, sunday: 0 };
+function kempseyBreakdown(list, rates) {
+  const rateMap = { morning: 0, afternoon10to1: 0, afternoon1to4: 0, saturday: 0, sunday: 0 };
   let gross = 0, hours = 0;
   list.forEach(s => {
-    gross += calcShiftPay(s);
+    gross += calcShiftPay(s, rates);
     const h = parseFloat(s.hours) || 0;
     hours += h;
     const dow = getDayOfWeek(s.date);
-    if (dow === 0) rates.sunday += h;
-    else if (dow === 6) rates.saturday += h;
-    else rates[s.kempseyRate || "morning"] += h;
+    if (dow === 0) rateMap.sunday += h;
+    else if (dow === 6) rateMap.saturday += h;
+    else rateMap[s.kempseyRate || "morning"] += h;
   });
-  return { rates, gross, hours };
+  return { rates: rateMap, gross, hours };
 }
 
+function jobGrossInWindow(job, shifts, win, rates) {
+  const list = shifts.filter(s => s.job === job && s.entryType === "shift" && inWindow(s.date, win));
+  if (job === "aspen") return aspenBreakdown(list, rates).gross;
+  if (job === "kempsey") return kempseyBreakdown(list, rates).gross;
+  return rates.fulltime.gross;
+}
 
-function calcAspenPay(shift) {
-  const dow = getDayOfWeek(shift.date);
-  const hours = parseFloat(shift.hours) || 0;
-  if (shift.shiftType === "oncall") {
-    if (dow === 0 || shift.isPublicHoliday) return ASPEN_RATES.onCallSunPH;
-    if (dow === 6) return ASPEN_RATES.onCallSat;
-    return ASPEN_RATES.onCallMF;
+function upcomingPaydays(shifts, base, rates, count = 4) {
+  const today = new Date(base instanceof Date ? base : base + "T00:00:00");
+  today.setHours(0, 0, 0, 0);
+  const entries = [];
+  for (const job of ["aspen", "kempsey", "fulltime"]) {
+    for (let off = -1; off <= 3; off++) {
+      const win = payWindow(job, today, off);
+      const pd = paydayFor(job, win);
+      if (pd >= today) entries.push({ job, win, payday: pd, gross: jobGrossInWindow(job, shifts, win, rates) });
+    }
   }
-  if (shift.shiftType === "calledin15") return hours * ASPEN_RATES.calledIn15;
-  if (shift.shiftType === "calledin2") return hours * ASPEN_RATES.calledIn2;
-  if (shift.isPublicHoliday) return hours * ASPEN_RATES.publicHoliday;
-  if (dow === 0) return hours * ASPEN_RATES.sunday;
-  if (dow === 6) return hours * ASPEN_RATES.saturday;
-  // Split ordinary / evening
-  const ordHrs = parseFloat(shift.ordinaryHours) || 0;
-  const eveHrs = parseFloat(shift.eveningHours) || 0;
-  if (ordHrs || eveHrs) {
-    return ordHrs * ASPEN_RATES.ordinary + eveHrs * ASPEN_RATES.evening;
+  entries.sort((a, b) => a.payday - b.payday);
+  const groups = [];
+  for (const e of entries) {
+    const key = ymd(e.payday);
+    let g = groups.find(x => x.key === key);
+    if (!g) { g = { key, payday: e.payday, items: [] }; groups.push(g); }
+    if (!g.items.some(it => it.job === e.job)) g.items.push(e);
   }
-  // Fallback: assume ordinary
-  return hours * ASPEN_RATES.ordinary;
+  return groups.slice(0, count);
 }
 
-function calcKempseyPay(shift) {
-  const dow = getDayOfWeek(shift.date);
-  const hours = parseFloat(shift.hours) || 0;
-  if (dow === 0) return hours * KEMPSEY_RATES.sunday;
-  if (dow === 6) return hours * KEMPSEY_RATES.saturday;
-  // Use shift time category
-  if (shift.kempseyRate === "morning") return hours * KEMPSEY_RATES.morning;
-  if (shift.kempseyRate === "afternoon10to1") return hours * KEMPSEY_RATES.afternoon10to1;
-  if (shift.kempseyRate === "afternoon1to4") return hours * KEMPSEY_RATES.afternoon1to4;
-  return hours * KEMPSEY_RATES.morning; // default
+function itemNet(it, rates) {
+  return it.job === "fulltime" ? rates.fulltime.net : estimateTakeHome(it.gross);
+}
+function itemGross(it, rates) {
+  return it.job === "fulltime" ? rates.fulltime.gross : it.gross;
 }
 
-function calcShiftPay(shift) {
-  if (shift.job === "aspen") return calcAspenPay(shift);
-  if (shift.job === "kempsey") return calcKempseyPay(shift);
-  return 0; // Full-time is fixed
-}
-
-// Take-home ≈ 50% of gross + $505 (fits observed Aspen pays within ~$25).
-// Guard small/zero gross so net never exceeds gross or appears out of nowhere.
-function estimateTakeHome(gross) {
-  if (gross <= 0) return 0;
-  return Math.min(gross, Math.round(gross * 0.5 + 505));
-}
-
-// ─── Calendar helpers ───
+// ─── Calendar helpers (Monday-first) ───
 function getMonthDays(year, month) {
   const first = new Date(year, month, 1);
   const last = new Date(year, month + 1, 0);
   const days = [];
-  // Pad start
-  for (let i = 0; i < first.getDay(); i++) days.push(null);
+  const startDay = first.getDay();
+  const pad = startDay === 0 ? 6 : startDay - 1;
+  for (let i = 0; i < pad; i++) days.push(null);
   for (let d = 1; d <= last.getDate(); d++) days.push(d);
   return days;
 }
@@ -282,16 +294,47 @@ function toDateStr(y, m, d) {
   return `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
 }
 
-// Local YYYY-MM-DD from a Date (avoids UTC shift from toISOString).
 function ymd(d) {
   return toDateStr(d.getFullYear(), d.getMonth(), d.getDate());
 }
 
+function entryLabel(s) {
+  if (s.entryType === "meeting") return s.notes ? s.notes : "Meeting";
+  if (s.entryType === "note") return s.notes ? s.notes : "Note";
+  if (s.job === "aspen") {
+    if (s.shiftType === "oncall") return "On-call";
+    if (s.shiftType === "calledin15") return "Called-in 1.5x";
+    if (s.shiftType === "calledin2") return "Called-in 2x";
+    const m = (s.notes || "").match(/^(OCC Health|HIAS|TRAIN)/);
+    return m ? m[1] : "Aspen";
+  }
+  if (s.job === "kempsey") return "Kempsey";
+  return "Full-time";
+}
+
+function daysUntil(d, base) {
+  const today = new Date(base instanceof Date ? base : base + "T00:00:00");
+  today.setHours(0, 0, 0, 0);
+  const days = Math.round((d - today) / 86400000);
+  if (days <= 0) return "today";
+  if (days === 1) return "tomorrow";
+  if (days < 14) return `in ${days} days`;
+  return `in ${Math.round(days / 7)} weeks`;
+}
+
+// ─── Styles ───
+const iconBtnStyle = { background: "none", border: "none", cursor: "pointer", padding: 6, color: "var(--muted)", borderRadius: 6 };
+const primaryBtn = { background: "var(--accent)", color: "#fff", border: "none", borderRadius: 10, padding: "12px 20px", fontWeight: 600, fontSize: 15, cursor: "pointer" };
+const tagBtn = { border: "1px solid var(--border)", borderRadius: 8, padding: "7px 14px", fontSize: 13, cursor: "pointer", fontWeight: 500, transition: "all 0.15s" };
+const fieldGroup = { marginBottom: 14 };
+const labelStyle = { display: "block", fontSize: 12, fontWeight: 600, color: "var(--muted)", marginBottom: 4 };
+const inputStyle = { width: "100%", padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 8, fontSize: 15, background: "var(--bg)", color: "var(--text)", boxSizing: "border-box" };
+
 // ─── Components ───
 
-function ShiftForm({ onSave, editShift, onCancel }) {
+function ShiftForm({ onSave, editShift, onCancel, rates, defaultDate }) {
   const [job, setJob] = useState(editShift?.job || "aspen");
-  const [date, setDate] = useState(editShift?.date || todaySydney());
+  const [date, setDate] = useState(editShift?.date || defaultDate || todaySydney());
   const [hours, setHours] = useState(editShift?.hours || "");
   const [ordinaryHours, setOrdinaryHours] = useState(editShift?.ordinaryHours || "");
   const [eveningHours, setEveningHours] = useState(editShift?.eveningHours || "");
@@ -317,10 +360,10 @@ function ShiftForm({ onSave, editShift, onCancel }) {
   };
 
   return (
-    <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 20, marginBottom: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>{editShift ? "Edit entry" : "Add entry"}</h3>
-        {onCancel && <button onClick={onCancel} style={iconBtnStyle}><X size={18} /></button>}
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+        <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>{editShift ? "Edit entry" : "New entry"}</h3>
+        {onCancel && <button onClick={onCancel} style={iconBtnStyle}><X size={20} /></button>}
       </div>
 
       {/* Entry type */}
@@ -329,7 +372,7 @@ function ShiftForm({ onSave, editShift, onCancel }) {
         <div style={{ display: "flex", gap: 8 }}>
           {["shift", "meeting", "note"].map(t => (
             <button key={t} onClick={() => setEntryType(t)}
-              style={{ ...tagBtn, background: entryType === t ? "var(--accent)" : "var(--bg)", color: entryType === t ? "#fff" : "var(--text)" }}>
+              style={{ ...tagBtn, flex: 1, textAlign: "center", background: entryType === t ? "var(--accent)" : "var(--bg)", color: entryType === t ? "#fff" : "var(--text)" }}>
               {t === "shift" ? "Shift" : t === "meeting" ? "Meeting" : "Note"}
             </button>
           ))}
@@ -342,7 +385,7 @@ function ShiftForm({ onSave, editShift, onCancel }) {
         <div style={{ display: "flex", gap: 8 }}>
           {Object.entries(JOBS).map(([k, v]) => (
             <button key={k} onClick={() => setJob(k)}
-              style={{ ...tagBtn, background: job === k ? v.color : "var(--bg)", color: job === k ? "#fff" : "var(--text)", borderColor: v.color }}>
+              style={{ ...tagBtn, flex: 1, textAlign: "center", background: job === k ? v.color : "var(--bg)", color: job === k ? "#fff" : "var(--text)", borderColor: v.color }}>
               {v.name}
             </button>
           ))}
@@ -369,13 +412,11 @@ function ShiftForm({ onSave, editShift, onCancel }) {
 
       {entryType === "shift" && (
         <>
-          {/* Hours */}
           <div style={fieldGroup}>
             <label style={labelStyle}>Total hours</label>
             <input type="number" step="0.5" value={hours} onChange={e => setHours(e.target.value)} placeholder="e.g. 8" style={inputStyle} />
           </div>
 
-          {/* Aspen specifics */}
           {job === "aspen" && (
             <>
               <div style={fieldGroup}>
@@ -399,21 +440,20 @@ function ShiftForm({ onSave, editShift, onCancel }) {
                   </div>
                 </div>
               )}
-              <label style={{ ...labelStyle, display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
-                <input type="checkbox" checked={isPH} onChange={e => setIsPH(e.target.checked)} />
+              <label style={{ ...labelStyle, display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: 14 }}>
+                <input type="checkbox" checked={isPH} onChange={e => setIsPH(e.target.checked)} style={{ width: 18, height: 18 }} />
                 Public holiday
               </label>
             </>
           )}
 
-          {/* Kempsey specifics */}
           {job === "kempsey" && getDayOfWeek(date) >= 1 && getDayOfWeek(date) <= 5 && (
             <div style={fieldGroup}>
               <label style={labelStyle}>Rate period</label>
               <select value={kempseyRate} onChange={e => setKempseyRate(e.target.value)} style={inputStyle}>
-                <option value="morning">Morning/day (6am-10am) - $61.82/hr</option>
-                <option value="afternoon10to1">Afternoon (10am-1pm) - $67.44/hr</option>
-                <option value="afternoon1to4">Afternoon (1pm-4pm) - $68.84/hr</option>
+                <option value="morning">Morning (6am-10am) - {fmtMoney(rates.kempsey.morning)}/hr</option>
+                <option value="afternoon10to1">Afternoon (10am-1pm) - {fmtMoney(rates.kempsey.afternoon10to1)}/hr</option>
+                <option value="afternoon1to4">Afternoon (1pm-4pm) - {fmtMoney(rates.kempsey.afternoon1to4)}/hr</option>
               </select>
             </div>
           )}
@@ -428,9 +468,9 @@ function ShiftForm({ onSave, editShift, onCancel }) {
 
       {/* Pay preview */}
       {entryType === "shift" && job !== "fulltime" && (
-        <div style={{ background: "var(--bg)", borderRadius: 8, padding: 12, marginBottom: 12 }}>
+        <div style={{ background: "var(--bg)", borderRadius: 10, padding: 14, marginBottom: 14 }}>
           <span style={{ fontSize: 13, color: "var(--muted)" }}>Estimated pay: </span>
-          <span style={{ fontWeight: 700, fontSize: 15 }}>{fmtMoney(calcShiftPay({ job, date, hours, ordinaryHours, eveningHours, shiftType, kempseyRate, isPublicHoliday: isPH }))}</span>
+          <span style={{ fontWeight: 700, fontSize: 16 }}>{fmtMoney(calcShiftPay({ job, date, hours, ordinaryHours, eveningHours, shiftType, kempseyRate, isPublicHoliday: isPH }, rates))}</span>
         </div>
       )}
 
@@ -441,131 +481,157 @@ function ShiftForm({ onSave, editShift, onCancel }) {
   );
 }
 
-// Short label for a calendar entry chip.
-function entryLabel(s) {
-  if (s.entryType === "meeting") return s.notes ? s.notes : "Meeting";
-  if (s.entryType === "note") return s.notes ? s.notes : "Note";
-  if (s.job === "aspen") {
-    if (s.shiftType === "oncall") return "On-call";
-    if (s.shiftType === "calledin15") return "Called-in 1.5×";
-    if (s.shiftType === "calledin2") return "Called-in 2×";
-    const m = (s.notes || "").match(/^(OCC Health|HIAS|TRAIN)/);
-    return m ? m[1] : "Aspen";
-  }
-  if (s.job === "kempsey") return "Kempsey";
-  return "Full-time";
-}
-
-function entryChipColors(s) {
-  if (s.entryType === "meeting") return { bg: "#fef3c7", fg: "#92400e" };
-  if (s.entryType === "note") return { bg: "#e0e7ff", fg: "#3730a3" };
-  const j = JOBS[s.job];
-  return { bg: j?.light || "#eee", fg: j?.color || "#333" };
-}
-
-function CalendarView({ shifts, year, month, onNav, onDayClick }) {
+// ─── Simplified Calendar ───
+function CalendarView({ shifts, year, month, onNav, selectedDate, onDayClick, onEdit, onDelete, rates, onAdd }) {
   const days = getMonthDays(year, month);
   const monthLabel = new Date(year, month).toLocaleDateString("en-AU", { timeZone: "Australia/Sydney", month: "long", year: "numeric" });
 
   const shiftsForDay = (d) => {
     if (!d) return [];
     const ds = toDateStr(year, month, d);
-    return shifts
-      .filter(s => s.date === ds)
-      .sort((a, b) => (a.startTime || "").localeCompare(b.startTime || ""));
+    return shifts.filter(s => s.date === ds).sort((a, b) => (a.startTime || "").localeCompare(b.startTime || ""));
   };
 
+  const selectedDayShifts = selectedDate
+    ? shifts.filter(s => s.date === selectedDate).sort((a, b) => (a.startTime || "").localeCompare(b.startTime || ""))
+    : [];
+
+  const today = todaySydney();
+
   return (
-    <div style={{ marginBottom: 20 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-        <button onClick={() => onNav(-1)} style={iconBtnStyle} aria-label="Previous month"><ChevronLeft size={20} /></button>
-        <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>{monthLabel}</h3>
-        <button onClick={() => onNav(1)} style={iconBtnStyle} aria-label="Next month"><ChevronRight size={20} /></button>
+    <div>
+      {/* Month header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, padding: "0 4px" }}>
+        <button onClick={() => onNav(-1)} style={{ ...iconBtnStyle, padding: 8 }} aria-label="Previous month"><ChevronLeft size={22} /></button>
+        <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>{monthLabel}</h3>
+        <button onClick={() => onNav(1)} style={{ ...iconBtnStyle, padding: 8 }} aria-label="Next month"><ChevronRight size={22} /></button>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 }}>
-        {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(d => (
-          <div key={d} style={{ textAlign: "center", fontSize: 11, fontWeight: 600, color: "var(--muted)", padding: "4px 0" }}>{d}</div>
+
+      {/* Grid */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 2, marginBottom: 6 }}>
+        {["M", "T", "W", "T", "F", "S", "S"].map((d, i) => (
+          <div key={i} style={{ textAlign: "center", fontSize: 12, fontWeight: 600, color: i >= 5 ? "var(--accent)" : "var(--muted)", padding: "6px 0" }}>{d}</div>
         ))}
         {days.map((d, i) => {
           const dayShifts = shiftsForDay(d);
-          const isToday = d && toDateStr(year, month, d) === todaySydney();
+          const ds = d ? toDateStr(year, month, d) : null;
+          const isToday = ds === today;
+          const isSelected = ds === selectedDate;
+          const jobSet = [...new Set(dayShifts.map(s => s.job))];
+
           return (
             <div key={i}
-              onClick={() => d && onDayClick(toDateStr(year, month, d))}
+              onClick={() => d && onDayClick(ds === selectedDate ? null : ds)}
               style={{
-                minHeight: 96, borderRadius: 8, padding: 4, cursor: d ? "pointer" : "default",
-                background: isToday ? "var(--accent-light)" : d ? "var(--surface)" : "transparent",
-                border: isToday ? "2px solid var(--accent)" : "1px solid var(--border)",
-                display: "flex", flexDirection: "column", gap: 3, overflow: "hidden",
+                height: 48, borderRadius: 12, cursor: d ? "pointer" : "default",
+                display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+                background: isSelected ? "var(--accent)" : isToday ? "var(--accent-light)" : "transparent",
+                transition: "background 0.15s",
               }}
             >
               {d && (
                 <>
-                  <div style={{ fontSize: 12, fontWeight: isToday ? 800 : 500, textAlign: "right", paddingRight: 2, color: isToday ? "var(--accent)" : "var(--text)" }}>{d}</div>
-                  {dayShifts.map(s => {
-                    const c = entryChipColors(s);
-                    return (
-                      <div key={s.id} title={`${JOBS[s.job]?.name || ""} ${entryLabel(s)} ${s.startTime || ""}${s.endTime ? "–" + s.endTime : ""}`}
-                        style={{
-                          background: c.bg, color: c.fg, borderRadius: 4, padding: "2px 4px",
-                          fontSize: 10, lineHeight: 1.25, fontWeight: 600,
-                          whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
-                        }}>
-                        {s.startTime ? <span style={{ fontWeight: 700 }}>{s.startTime} </span> : null}
-                        {entryLabel(s)}
-                      </div>
-                    );
-                  })}
+                  <div style={{
+                    fontSize: 15, fontWeight: isToday || isSelected ? 700 : 400,
+                    color: isSelected ? "#fff" : isToday ? "var(--accent)" : "var(--text)",
+                    lineHeight: 1.2,
+                  }}>{d}</div>
+                  {dayShifts.length > 0 && (
+                    <div style={{ display: "flex", gap: 3, marginTop: 3 }}>
+                      {jobSet.slice(0, 3).map(j => (
+                        <div key={j} style={{
+                          width: 6, height: 6, borderRadius: "50%",
+                          background: isSelected ? "rgba(255,255,255,0.8)" : JOBS[j]?.color || "#888",
+                        }} />
+                      ))}
+                    </div>
+                  )}
                 </>
               )}
             </div>
           );
         })}
       </div>
+
       {/* Legend */}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 14, marginTop: 12, fontSize: 12, color: "var(--muted)" }}>
+      <div style={{ display: "flex", gap: 16, padding: "8px 4px", fontSize: 11, color: "var(--muted)" }}>
         {Object.entries(JOBS).map(([k, v]) => (
           <div key={k} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <div style={{ width: 10, height: 10, borderRadius: 3, background: v.light, border: `1px solid ${v.color}` }} />
+            <div style={{ width: 8, height: 8, borderRadius: "50%", background: v.color }} />
             {v.name}
           </div>
         ))}
-        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-          <div style={{ width: 10, height: 10, borderRadius: 3, background: "#fef3c7", border: "1px solid #92400e" }} />
-          Meeting
-        </div>
       </div>
+
+      {/* Selected day detail */}
+      {selectedDate && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <h4 style={{ margin: 0, fontSize: 15, fontWeight: 700 }}>{fmtDate(selectedDate)}</h4>
+            <button onClick={() => onAdd(selectedDate)} style={{ ...tagBtn, fontSize: 12, padding: "5px 12px", display: "flex", alignItems: "center", gap: 4, background: "var(--accent)", color: "#fff", borderColor: "var(--accent)" }}>
+              <Plus size={14} /> Add
+            </button>
+          </div>
+          {selectedDayShifts.length === 0 && (
+            <div style={{ fontSize: 13, color: "var(--muted)", padding: 20, textAlign: "center", background: "var(--surface)", borderRadius: 12 }}>
+              No entries for this day
+            </div>
+          )}
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {selectedDayShifts.map(s => {
+              const pay = s.entryType === "shift" ? calcShiftPay(s, rates) : 0;
+              const jobInfo = JOBS[s.job];
+              return (
+                <div key={s.id} style={{
+                  display: "flex", alignItems: "center", gap: 10, padding: "12px 14px",
+                  background: "var(--surface)", borderRadius: 12,
+                  borderLeft: `3px solid ${jobInfo?.color || "#888"}`,
+                }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                      {s.startTime && <span style={{ fontSize: 14, fontWeight: 600 }}>{s.startTime}{s.endTime ? `–${s.endTime}` : ""}</span>}
+                      <span style={{ fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 5, background: jobInfo?.light, color: jobInfo?.color }}>{jobInfo?.name}</span>
+                      {s.entryType === "meeting" && <span style={{ fontSize: 10, background: "#fef3c7", color: "#92400e", padding: "2px 6px", borderRadius: 4 }}>Meeting</span>}
+                      {s.entryType === "note" && <span style={{ fontSize: 10, background: "#e0e7ff", color: "#3730a3", padding: "2px 6px", borderRadius: 4 }}>Note</span>}
+                      {s.isPublicHoliday && <span style={{ fontSize: 10, background: "#fce7f3", color: "#9d174d", padding: "2px 6px", borderRadius: 4 }}>PH</span>}
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
+                      {s.entryType === "shift" && s.hours > 0 && `${s.hours}h`}
+                      {s.entryType === "shift" && s.job === "aspen" && s.shiftType === "oncall" && " on-call"}
+                      {s.notes && ` - ${s.notes}`}
+                    </div>
+                  </div>
+                  {pay > 0 && <div style={{ fontSize: 15, fontWeight: 700, color: jobInfo?.color }}>{fmtMoney(pay)}</div>}
+                  <button onClick={() => onEdit(s)} style={iconBtnStyle} aria-label="Edit"><Edit3 size={16} /></button>
+                  <button onClick={() => onDelete(s.id)} style={{ ...iconBtnStyle, color: "#dc2626" }} aria-label="Delete"><Trash2 size={16} /></button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
+// ─── Pay components ───
 function PayRow({ label, sub, value, bold }) {
   return (
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "3px 0", fontSize: 13, fontWeight: bold ? 700 : 400 }}>
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "4px 0", fontSize: 13, fontWeight: bold ? 700 : 400 }}>
       <span>{label} {sub && <span style={{ color: "var(--muted)", fontSize: 12 }}>{sub}</span>}</span>
       <span style={{ fontWeight: bold ? 800 : 600 }}>{value}</span>
     </div>
   );
 }
 
-// Net (after-tax) for a single job's payday.
-function itemNet(it) {
-  return it.job === "fulltime" ? FT_NET : estimateTakeHome(it.gross);
-}
-function itemGross(it) {
-  return it.job === "fulltime" ? FT_GROSS : it.gross;
-}
-
-// Upcoming paydays across all jobs — the money actually coming in, soonest first.
-// Each job is shown separately with its own gross and after-tax (take-home).
-function UpcomingPayCard({ shifts, base }) {
-  const groups = upcomingPaydays(shifts, base, 4);
+function UpcomingPayCard({ shifts, base, rates }) {
+  const groups = upcomingPaydays(shifts, base, rates, 4);
   const fmtDay = (d) => d.toLocaleDateString("en-AU", { timeZone: "Australia/Sydney", weekday: "short", day: "numeric", month: "short" });
   const fmtShort = (d) => d.toLocaleDateString("en-AU", { timeZone: "Australia/Sydney", day: "2-digit", month: "short" });
 
   if (!groups.length) {
     return (
-      <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 16, marginBottom: 16 }}>
         <div style={{ fontSize: 13, fontWeight: 700 }}>Upcoming pay</div>
         <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 6 }}>No upcoming paydays.</div>
       </div>
@@ -575,11 +641,10 @@ function UpcomingPayCard({ shifts, base }) {
   const next = groups[0];
 
   return (
-    <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 16 }}>
+    <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 16, marginBottom: 16 }}>
       <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Upcoming pay</div>
 
-      {/* Next payday — highlighted, take-home prominent */}
-      <div style={{ background: "var(--accent-light)", border: `1px solid ${JOBS.aspen.color}33`, borderRadius: 10, padding: 14, marginBottom: 12 }}>
+      <div style={{ background: "var(--accent-light)", border: `1px solid ${JOBS.aspen.color}33`, borderRadius: 12, padding: 14, marginBottom: 12 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: "var(--accent)" }}>NEXT PAY · {fmtDay(next.payday)}</div>
           <div style={{ fontSize: 11, color: "var(--muted)" }}>{daysUntil(next.payday, base)}</div>
@@ -591,14 +656,13 @@ function UpcomingPayCard({ shifts, base }) {
               <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 4 }}>{fmtShort(it.win.start)}–{fmtShort(it.win.end)}</div>
             </div>
             <div style={{ textAlign: "right" }}>
-              <div style={{ fontSize: 28, fontWeight: 800, color: "var(--accent)", lineHeight: 1.05 }}>~{fmtMoney(itemNet(it))}</div>
-              <div style={{ fontSize: 12, color: "var(--muted)" }}>take-home · {fmtMoney(itemGross(it))} gross</div>
+              <div style={{ fontSize: 26, fontWeight: 800, color: "var(--accent)", lineHeight: 1.05 }}>~{fmtMoney(itemNet(it, rates))}</div>
+              <div style={{ fontSize: 11, color: "var(--muted)" }}>take-home · {fmtMoney(itemGross(it, rates))} gross</div>
             </div>
           </div>
         ))}
       </div>
 
-      {/* Following paydays — one row per job */}
       {groups.slice(1).map(g => (
         <div key={g.key}>
           {g.items.map((it, idx) => (
@@ -610,8 +674,8 @@ function UpcomingPayCard({ shifts, base }) {
                 <div style={{ fontSize: 11, color: JOBS[it.job].color, fontWeight: 600 }}>{JOBS[it.job].name}</div>
               </div>
               <div style={{ textAlign: "right" }}>
-                <div style={{ fontSize: 18, fontWeight: 800 }}>~{fmtMoney(itemNet(it))}</div>
-                <div style={{ fontSize: 10, color: "var(--muted)" }}>take-home · {fmtMoney(itemGross(it))} gross</div>
+                <div style={{ fontSize: 18, fontWeight: 800 }}>~{fmtMoney(itemNet(it, rates))}</div>
+                <div style={{ fontSize: 10, color: "var(--muted)" }}>take-home · {fmtMoney(itemGross(it, rates))} gross</div>
               </div>
             </div>
           ))}
@@ -621,81 +685,70 @@ function UpcomingPayCard({ shifts, base }) {
   );
 }
 
-function daysUntil(d, base) {
-  const today = new Date(base instanceof Date ? base : base + "T00:00:00");
-  today.setHours(0, 0, 0, 0);
-  const days = Math.round((d - today) / 86400000);
-  if (days <= 0) return "today";
-  if (days === 1) return "tomorrow";
-  if (days < 14) return `in ${days} days`;
-  return `in ${Math.round(days / 7)} weeks`;
-}
-
-// One job's pay, with its own cycle navigation and category breakdown.
-function JobPayPanel({ job, shifts, base }) {
+function JobPayPanel({ job, shifts, base, rates }) {
   const [offset, setOffset] = useState(0);
   const win = payWindow(job, base, offset);
   const info = JOBS[job];
+  const R = rates[job];
   const list = shifts.filter(s => s.job === job && s.entryType === "shift" && inWindow(s.date, win));
 
   let body = null, total = 0, footerSub = null;
 
   if (job === "aspen") {
-    const b = aspenBreakdown(list);
+    const b = aspenBreakdown(list, rates);
     total = b.gross;
     const rows = [
-      ["Ordinary (07–15)", b.cats.ordinary, ASPEN_RATES.ordinary],
-      ["Evening (15–07)", b.cats.evening, ASPEN_RATES.evening],
-      ["Saturday", b.cats.saturday, ASPEN_RATES.saturday],
-      ["Sunday", b.cats.sunday, ASPEN_RATES.sunday],
-      ["Public holiday", b.cats.publicHoliday, ASPEN_RATES.publicHoliday],
-      ["Called-in 1.5×", b.calledin.h15, ASPEN_RATES.calledIn15],
-      ["Called-in 2×", b.calledin.h2, ASPEN_RATES.calledIn2],
+      ["Ordinary (07-15)", b.cats.ordinary, R.ordinary],
+      ["Evening (15-07)", b.cats.evening, R.evening],
+      ["Saturday", b.cats.saturday, R.saturday],
+      ["Sunday", b.cats.sunday, R.sunday],
+      ["Public holiday", b.cats.publicHoliday, R.publicHoliday],
+      ["Called-in 1.5x", b.calledin.h15, R.calledIn15],
+      ["Called-in 2x", b.calledin.h2, R.calledIn2],
     ].filter(r => r[1] > 0);
     const oc = [
-      ["On-call M–F", b.oncall.mf, ASPEN_RATES.onCallMF],
-      ["On-call Sat", b.oncall.sat, ASPEN_RATES.onCallSat],
-      ["On-call Sun/PH", b.oncall.sunph, ASPEN_RATES.onCallSunPH],
+      ["On-call M-F", b.oncall.mf, R.onCallMF],
+      ["On-call Sat", b.oncall.sat, R.onCallSat],
+      ["On-call Sun/PH", b.oncall.sunph, R.onCallSunPH],
     ].filter(r => r[1] > 0);
     footerSub = `${+b.workedHours.toFixed(1)}h worked`;
     body = (
       <>
-        {rows.map(([l, h, r]) => <PayRow key={l} label={l} sub={`${+h.toFixed(2)}h × $${r}`} value={fmtMoney(h * r)} />)}
-        {oc.map(([l, n, r]) => <PayRow key={l} label={l} sub={`${n} × $${r}`} value={fmtMoney(n * r)} />)}
+        {rows.map(([l, h, r]) => <PayRow key={l} label={l} sub={`${+h.toFixed(2)}h x $${r}`} value={fmtMoney(h * r)} />)}
+        {oc.map(([l, n, r]) => <PayRow key={l} label={l} sub={`${n} x $${r}`} value={fmtMoney(n * r)} />)}
         {!rows.length && !oc.length && <div style={{ fontSize: 13, color: "var(--muted)", padding: "6px 0" }}>No shifts this period.</div>}
       </>
     );
   } else if (job === "kempsey") {
-    const b = kempseyBreakdown(list);
+    const b = kempseyBreakdown(list, rates);
     total = b.gross;
     const rows = [
-      ["Morning (6–10)", b.rates.morning, KEMPSEY_RATES.morning],
-      ["Afternoon (10–1)", b.rates.afternoon10to1, KEMPSEY_RATES.afternoon10to1],
-      ["Afternoon (1–4)", b.rates.afternoon1to4, KEMPSEY_RATES.afternoon1to4],
-      ["Saturday", b.rates.saturday, KEMPSEY_RATES.saturday],
-      ["Sunday", b.rates.sunday, KEMPSEY_RATES.sunday],
+      ["Morning (6-10)", b.rates.morning, R.morning],
+      ["Afternoon (10-1)", b.rates.afternoon10to1, R.afternoon10to1],
+      ["Afternoon (1-4)", b.rates.afternoon1to4, R.afternoon1to4],
+      ["Saturday", b.rates.saturday, R.saturday],
+      ["Sunday", b.rates.sunday, R.sunday],
     ].filter(r => r[1] > 0);
     footerSub = `${+b.hours.toFixed(1)}h worked`;
     body = (
       <>
-        {rows.map(([l, h, r]) => <PayRow key={l} label={l} sub={`${+h.toFixed(2)}h × $${r}`} value={fmtMoney(h * r)} />)}
+        {rows.map(([l, h, r]) => <PayRow key={l} label={l} sub={`${+h.toFixed(2)}h x $${r}`} value={fmtMoney(h * r)} />)}
         {!rows.length && <div style={{ fontSize: 13, color: "var(--muted)", padding: "6px 0" }}>No shifts this period.</div>}
       </>
     );
   } else {
-    total = FT_GROSS;
-    footerSub = `${fmtMoney(FT_NET)} net`;
+    total = rates.fulltime.gross;
+    footerSub = `${fmtMoney(rates.fulltime.net)} net`;
     body = (
       <>
-        <PayRow label="Salary (fixed)" sub="gross per fortnight" value={fmtMoney(FT_GROSS)} />
-        <PayRow label="After tax" sub="take-home" value={fmtMoney(FT_NET)} />
-        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Paid on the alternate week to Aspen.</div>
+        <PayRow label="Salary (fixed)" sub="gross per fortnight" value={fmtMoney(rates.fulltime.gross)} />
+        <PayRow label="After tax" sub="take-home" value={fmtMoney(rates.fulltime.net)} />
       </>
     );
   }
 
   return (
-    <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 14, borderTop: `3px solid ${info.color}` }}>
+    <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 14, borderTop: `3px solid ${info.color}` }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
         <span style={{ fontSize: 14, fontWeight: 700, color: info.color }}>{info.name}</span>
         <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
@@ -718,7 +771,6 @@ function JobPayPanel({ job, shifts, base }) {
 }
 
 function FatigueIndicator({ shifts, targetDate }) {
-  // Check hours in 7 days before and including target
   const target = new Date(targetDate + "T00:00:00");
   let totalHrs = 0;
   let consecutiveDays = 0;
@@ -739,8 +791,8 @@ function FatigueIndicator({ shifts, targetDate }) {
   const colors = { high: "#dc2626", moderate: "#d97706", low: "#16a34a" };
 
   return (
-    <div style={{ background: "var(--surface)", border: `1px solid ${colors[level]}33`, borderRadius: 10, padding: 14, marginBottom: 12 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+    <div style={{ background: "var(--surface)", border: `1px solid ${colors[level]}33`, borderRadius: 12, padding: 14, marginBottom: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
         {level === "high" && <AlertTriangle size={16} color={colors[level]} />}
         <span style={{ fontSize: 13, fontWeight: 600, color: colors[level] }}>
           {level === "high" ? "High fatigue risk" : level === "moderate" ? "Moderate load" : "Manageable load"}
@@ -754,30 +806,27 @@ function FatigueIndicator({ shifts, targetDate }) {
   );
 }
 
-function ShiftList({ shifts, onEdit, onDelete }) {
-  if (!shifts.length) return <div style={{ fontSize: 13, color: "var(--muted)", padding: 16, textAlign: "center" }}>No entries for this period.</div>;
+function ShiftList({ shifts, onEdit, onDelete, rates }) {
+  if (!shifts.length) return <div style={{ fontSize: 13, color: "var(--muted)", padding: 20, textAlign: "center", background: "var(--surface)", borderRadius: 12 }}>No entries for this period.</div>;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       {shifts.slice().sort((a, b) => a.date.localeCompare(b.date) || (a.startTime || "").localeCompare(b.startTime || "")).map(s => {
-        const pay = s.entryType === "shift" ? calcShiftPay(s) : 0;
+        const pay = s.entryType === "shift" ? calcShiftPay(s, rates) : 0;
         const jobInfo = JOBS[s.job];
         return (
           <div key={s.id} style={{
-            display: "flex", alignItems: "center", gap: 10, padding: "10px 12px",
-            background: "var(--surface)", borderRadius: 8, borderLeft: `3px solid ${jobInfo?.color || "#888"}`,
+            display: "flex", alignItems: "center", gap: 10, padding: "12px 14px",
+            background: "var(--surface)", borderRadius: 12, borderLeft: `3px solid ${jobInfo?.color || "#888"}`,
           }}>
             <div style={{ flex: 1 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                 <span style={{ fontSize: 13, fontWeight: 600 }}>{fmtDate(s.date)}</span>
                 {s.startTime && <span style={{ fontSize: 11, color: "var(--muted)" }}>{s.startTime}{s.endTime ? `-${s.endTime}` : ""}</span>}
-                <span style={{
-                  fontSize: 10, fontWeight: 600, padding: "1px 6px", borderRadius: 4,
-                  background: jobInfo?.light, color: jobInfo?.color,
-                }}>{jobInfo?.name}</span>
-                {s.entryType === "meeting" && <span style={{ fontSize: 10, background: "#fef3c7", color: "#92400e", padding: "1px 6px", borderRadius: 4 }}>Meeting</span>}
-                {s.entryType === "note" && <span style={{ fontSize: 10, background: "#e0e7ff", color: "#3730a3", padding: "1px 6px", borderRadius: 4 }}>Note</span>}
-                {s.isPublicHoliday && <span style={{ fontSize: 10, background: "#fce7f3", color: "#9d174d", padding: "1px 6px", borderRadius: 4 }}>PH</span>}
+                <span style={{ fontSize: 10, fontWeight: 600, padding: "2px 6px", borderRadius: 5, background: jobInfo?.light, color: jobInfo?.color }}>{jobInfo?.name}</span>
+                {s.entryType === "meeting" && <span style={{ fontSize: 10, background: "#fef3c7", color: "#92400e", padding: "2px 6px", borderRadius: 4 }}>Meeting</span>}
+                {s.entryType === "note" && <span style={{ fontSize: 10, background: "#e0e7ff", color: "#3730a3", padding: "2px 6px", borderRadius: 4 }}>Note</span>}
+                {s.isPublicHoliday && <span style={{ fontSize: 10, background: "#fce7f3", color: "#9d174d", padding: "2px 6px", borderRadius: 4 }}>PH</span>}
               </div>
               <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
                 {s.entryType === "shift" && s.hours > 0 && `${s.hours}h`}
@@ -788,8 +837,8 @@ function ShiftList({ shifts, onEdit, onDelete }) {
             {s.entryType === "shift" && s.job !== "fulltime" && (
               <div style={{ fontSize: 14, fontWeight: 700, color: jobInfo?.color }}>{fmtMoney(pay)}</div>
             )}
-            <button onClick={() => onEdit(s)} style={iconBtnStyle} aria-label="Edit"><Edit3 size={14} /></button>
-            <button onClick={() => onDelete(s.id)} style={{ ...iconBtnStyle, color: "#dc2626" }} aria-label="Delete"><Trash2 size={14} /></button>
+            <button onClick={() => onEdit(s)} style={iconBtnStyle} aria-label="Edit"><Edit3 size={16} /></button>
+            <button onClick={() => onDelete(s.id)} style={{ ...iconBtnStyle, color: "#dc2626" }} aria-label="Delete"><Trash2 size={16} /></button>
           </div>
         );
       })}
@@ -797,22 +846,64 @@ function ShiftList({ shifts, onEdit, onDelete }) {
   );
 }
 
-// ─── Styles ───
-const iconBtnStyle = { background: "none", border: "none", cursor: "pointer", padding: 4, color: "var(--muted)", borderRadius: 4 };
-const primaryBtn = { background: "var(--accent)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontWeight: 600, fontSize: 14, cursor: "pointer" };
-const tagBtn = { border: "1px solid var(--border)", borderRadius: 6, padding: "6px 12px", fontSize: 13, cursor: "pointer", fontWeight: 500, transition: "all 0.15s" };
-const fieldGroup = { marginBottom: 12 };
-const labelStyle = { display: "block", fontSize: 12, fontWeight: 600, color: "var(--muted)", marginBottom: 4 };
-const inputStyle = { width: "100%", padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 6, fontSize: 14, background: "var(--bg)", color: "var(--text)", boxSizing: "border-box" };
+// ─── Rates Editor ───
+function RatesEditor({ rates, onUpdateRate, onReset }) {
+  const RateGroup = ({ job, labels }) => (
+    <div style={{ background: "var(--surface)", borderRadius: 14, padding: 16, marginBottom: 12, borderTop: `3px solid ${JOBS[job].color}` }}>
+      <h4 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 700, color: JOBS[job].color }}>{JOBS[job].name}</h4>
+      {labels.map(({ key, label, unit }) => (
+        <div key={key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 0", borderBottom: "1px solid var(--border)" }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 500 }}>{label}</div>
+            {unit && <div style={{ fontSize: 11, color: "var(--muted)" }}>{unit}</div>}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <span style={{ fontSize: 14, color: "var(--muted)" }}>$</span>
+            <input
+              type="number"
+              step="0.01"
+              value={rates[job][key]}
+              onChange={e => onUpdateRate(job, key, parseFloat(e.target.value) || 0)}
+              style={{
+                width: 90, padding: "8px 10px", border: "1px solid var(--border)",
+                borderRadius: 8, fontSize: 15, textAlign: "right",
+                background: "var(--bg)", color: "var(--text)", boxSizing: "border-box",
+              }}
+            />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
 
-function ImportOverlay({ state, onConfirm, onConfirmFt, onClose, existing }) {
+  return (
+    <div>
+      <h3 style={{ fontSize: 17, fontWeight: 700, margin: "0 0 6px" }}>Hourly Rates</h3>
+      <p style={{ fontSize: 13, color: "var(--muted)", margin: "0 0 16px" }}>
+        Tap any rate to edit it. Changes save automatically.
+      </p>
+      <RateGroup job="aspen" labels={RATE_LABELS.aspen} />
+      <RateGroup job="kempsey" labels={RATE_LABELS.kempsey} />
+      <RateGroup job="fulltime" labels={RATE_LABELS.fulltime} />
+      <button onClick={onReset} style={{
+        ...tagBtn, width: "100%", textAlign: "center", marginTop: 8,
+        color: "#dc2626", borderColor: "#fecaca", background: "#fff5f5",
+      }}>
+        Reset all to defaults
+      </button>
+    </div>
+  );
+}
+
+// ─── Import Overlay ───
+function ImportOverlay({ state, onConfirm, onConfirmFt, onClose, existing, rates }) {
   const overlay = {
     position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 200,
     display: "flex", alignItems: "flex-end", justifyContent: "center",
   };
   const sheet = {
     background: "var(--surface)", width: "100%", maxWidth: 520, maxHeight: "88vh",
-    overflowY: "auto", borderRadius: "16px 16px 0 0", padding: 20,
+    overflowY: "auto", borderRadius: "16px 16px 0 0", padding: "20px 20px calc(20px + env(safe-area-inset-bottom, 0px))",
     boxShadow: "0 -4px 24px rgba(0,0,0,0.2)",
   };
   const header = (title) => (
@@ -823,7 +914,7 @@ function ImportOverlay({ state, onConfirm, onConfirmFt, onClose, existing }) {
   );
 
   if (state.loading) {
-    return <div style={overlay}><div style={sheet}><div style={{ padding: 40, textAlign: "center", color: "var(--muted)" }}>Reading PDF…</div></div></div>;
+    return <div style={overlay}><div style={sheet}><div style={{ padding: 40, textAlign: "center", color: "var(--muted)" }}>Reading PDF...</div></div></div>;
   }
   if (state.error) {
     return (
@@ -831,14 +922,13 @@ function ImportOverlay({ state, onConfirm, onConfirmFt, onClose, existing }) {
         <div style={sheet} onClick={e => e.stopPropagation()}>
           {header("Import failed")}
           <div style={{ fontSize: 14, color: "#dc2626", marginBottom: 16 }}>{state.error}</div>
-          <div style={{ fontSize: 13, color: "var(--muted)" }}>Upload an Aspen Medical “Individual Schedule” roster PDF, or a full-time Outlook weekly calendar PDF.</div>
+          <div style={{ fontSize: 13, color: "var(--muted)" }}>Upload an Aspen Medical roster PDF, or a full-time Outlook weekly calendar PDF.</div>
           <button onClick={onClose} style={{ ...primaryBtn, width: "100%", marginTop: 16 }}>Close</button>
         </div>
       </div>
     );
   }
 
-  // ── Full-time meetings import ──
   if (state.ft) {
     const meetings = state.ft.meetings;
     const have = new Set(existing.map(s => `${s.date}|${s.startTime || ""}|${s.entryType}|${s.notes || ""}`));
@@ -859,7 +949,7 @@ function ImportOverlay({ state, onConfirm, onConfirmFt, onClose, existing }) {
               <div style={{ fontSize: 12, fontWeight: 700, color: JOBS.fulltime.color, marginBottom: 4 }}>{dayLabel(ds)}</div>
               {byDay[ds].map((m, i) => (
                 <div key={i} style={{ display: "flex", gap: 10, fontSize: 13, padding: "5px 10px", background: "var(--bg)", borderRadius: 6, marginBottom: 3 }}>
-                  <span style={{ width: 96, color: "var(--muted)", flexShrink: 0 }}>{m.start}–{m.end}</span>
+                  <span style={{ width: 96, color: "var(--muted)", flexShrink: 0 }}>{m.start}-{m.end}</span>
                   <span style={{ flex: 1, fontWeight: 600 }}>{m.title}{m.teams && <span style={{ fontSize: 10, marginLeft: 6, padding: "1px 6px", borderRadius: 4, background: "#ede9fe", color: "#6d28d9" }}>Teams</span>}</span>
                 </div>
               ))}
@@ -878,9 +968,9 @@ function ImportOverlay({ state, onConfirm, onConfirmFt, onClose, existing }) {
   const { result } = state;
   const { fortnightStart, fortnightEnd, shifts, summary } = result;
   const { cat, oncall, workedHours, gross } = summary;
+  const R = rates.aspen;
   const fmtR = (d) => d.toLocaleDateString("en-AU", { timeZone: "Australia/Sydney", day: "2-digit", month: "2-digit" });
 
-  // How many are new vs already imported.
   const have = new Set(existing.map(s => `${s.date}|${s.startTime || ""}|${s.shiftType}|${s.notes || ""}`));
   const newCount = shifts.filter((s) => {
     const date = ymd(s.date);
@@ -890,16 +980,16 @@ function ImportOverlay({ state, onConfirm, onConfirmFt, onClose, existing }) {
   }).length;
 
   const rows = [
-    ["Ordinary (07–15)", cat.ordinary, ASPEN_RATES.ordinary],
-    ["Evening (15–07)", cat.evening, ASPEN_RATES.evening],
-    ["Saturday", cat.saturday, ASPEN_RATES.saturday],
-    ["Sunday", cat.sunday, ASPEN_RATES.sunday],
-    ["Public holiday", cat.publicHoliday, ASPEN_RATES.publicHoliday],
+    ["Ordinary (07-15)", cat.ordinary, R.ordinary],
+    ["Evening (15-07)", cat.evening, R.evening],
+    ["Saturday", cat.saturday, R.saturday],
+    ["Sunday", cat.sunday, R.sunday],
+    ["Public holiday", cat.publicHoliday, R.publicHoliday],
   ].filter(r => r[1] > 0);
   const ocRows = [
-    ["On-call M–F", oncall.mf, ASPEN_RATES.onCallMF],
-    ["On-call Sat", oncall.sat, ASPEN_RATES.onCallSat],
-    ["On-call Sun/PH", oncall.sunph, ASPEN_RATES.onCallSunPH],
+    ["On-call M-F", oncall.mf, R.onCallMF],
+    ["On-call Sat", oncall.sat, R.onCallSat],
+    ["On-call Sun/PH", oncall.sunph, R.onCallSunPH],
   ].filter(r => r[1] > 0);
 
   return (
@@ -907,19 +997,18 @@ function ImportOverlay({ state, onConfirm, onConfirmFt, onClose, existing }) {
       <div style={sheet} onClick={e => e.stopPropagation()}>
         {header("Review imported shifts")}
         <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 4 }}>Pay fortnight (from PDF)</div>
-        <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 14 }}>{fmtR(fortnightStart)} – {fmtR(fortnightEnd)}</div>
+        <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 14 }}>{fmtR(fortnightStart)} - {fmtR(fortnightEnd)}</div>
 
-        {/* Breakdown */}
         <div style={{ background: "var(--bg)", borderRadius: 10, padding: 12, marginBottom: 14 }}>
           {rows.map(([label, h, rate]) => (
             <div key={label} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "3px 0" }}>
-              <span>{label} <span style={{ color: "var(--muted)" }}>{h}h × ${rate}</span></span>
+              <span>{label} <span style={{ color: "var(--muted)" }}>{h}h x ${rate}</span></span>
               <span style={{ fontWeight: 600 }}>{fmtMoney(h * rate)}</span>
             </div>
           ))}
           {ocRows.map(([label, n, rate]) => (
             <div key={label} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "3px 0" }}>
-              <span>{label} <span style={{ color: "var(--muted)" }}>{n} × ${rate}</span></span>
+              <span>{label} <span style={{ color: "var(--muted)" }}>{n} x ${rate}</span></span>
               <span style={{ fontWeight: 600 }}>{fmtMoney(n * rate)}</span>
             </div>
           ))}
@@ -929,7 +1018,6 @@ function ImportOverlay({ state, onConfirm, onConfirmFt, onClose, existing }) {
           </div>
         </div>
 
-        {/* Shift list */}
         <div style={{ fontSize: 13, fontWeight: 600, color: "var(--muted)", marginBottom: 6 }}>{shifts.length} shift{shifts.length === 1 ? "" : "s"} detected</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 16 }}>
           {shifts.map((s, i) => (
@@ -937,7 +1025,7 @@ function ImportOverlay({ state, onConfirm, onConfirmFt, onClose, existing }) {
               <span style={{ width: 70, color: "var(--muted)" }}>{fmtDate(ymd(s.date))}</span>
               <span style={{ flex: 1, fontWeight: 600 }}>
                 {s.kind === "oncall" ? "On-call" : s.code}
-                {s.start && <span style={{ fontWeight: 400, color: "var(--muted)" }}> {s.start}–{s.end}</span>}
+                {s.start && <span style={{ fontWeight: 400, color: "var(--muted)" }}> {s.start}-{s.end}</span>}
               </span>
               <span style={{ fontWeight: 600 }}>
                 {s.kind === "oncall" ? "flat" : `${s.hours}h`}
@@ -960,26 +1048,37 @@ function ImportOverlay({ state, onConfirm, onConfirmFt, onClose, existing }) {
 // ─── Main App ───
 export default function ShiftTracker() {
   const [shifts, setShifts] = useState([]);
+  const [rates, setRates] = useState(DEFAULT_RATES);
   const [loaded, setLoaded] = useState(false);
-  const [view, setView] = useState("calendar"); // calendar | pay | list
+  const [view, setView] = useState("calendar");
   const [showForm, setShowForm] = useState(false);
   const [editShift, setEditShift] = useState(null);
+  const [formDefaultDate, setFormDefaultDate] = useState(null);
   const [calYear, setCalYear] = useState(+todaySydney().slice(0, 4));
   const [calMonth, setCalMonth] = useState(+todaySydney().slice(5, 7) - 1);
   const [selectedDate, setSelectedDate] = useState(null);
   const [jobFilter, setJobFilter] = useState("all");
-  const [importState, setImportState] = useState(null); // { loading } | { result } | { error }
+  const [importState, setImportState] = useState(null);
   const fileInputRef = useRef(null);
 
-  // Load
   useEffect(() => {
-    loadData("shifts", []).then(d => { setShifts(d); setLoaded(true); });
+    Promise.all([
+      loadData("shifts", []),
+      loadData("rates", null),
+    ]).then(([s, r]) => {
+      setShifts(s);
+      setRates(mergeRates(r));
+      setLoaded(true);
+    });
   }, []);
 
-  // Save on change
   useEffect(() => {
     if (loaded) saveData("shifts", shifts);
   }, [shifts, loaded]);
+
+  useEffect(() => {
+    if (loaded) saveData("rates", rates);
+  }, [rates, loaded]);
 
   const handleSave = (shift) => {
     setShifts(prev => {
@@ -989,13 +1088,37 @@ export default function ShiftTracker() {
     });
     setShowForm(false);
     setEditShift(null);
+    setFormDefaultDate(null);
   };
 
   const handleDelete = (id) => {
     setShifts(prev => prev.filter(s => s.id !== id));
   };
 
-  // ─── Aspen PDF import ───
+  const handleUpdateRate = (job, key, value) => {
+    setRates(prev => ({
+      ...prev,
+      [job]: { ...prev[job], [key]: value },
+    }));
+  };
+
+  const handleResetRates = () => {
+    setRates({ ...DEFAULT_RATES });
+  };
+
+  const openForm = (date) => {
+    setEditShift(null);
+    setFormDefaultDate(date || null);
+    setShowForm(true);
+  };
+
+  const openEditForm = (shift) => {
+    setEditShift(shift);
+    setFormDefaultDate(null);
+    setShowForm(true);
+  };
+
+  // PDF import
   const handlePdfFile = async (file) => {
     if (!file) return;
     setImportState({ loading: true });
@@ -1027,15 +1150,11 @@ export default function ShiftTracker() {
         if (have.has(key)) return;
         have.add(key);
         additions.push({
-          id: `ft_${Date.now()}_${i}`,
-          job: "fulltime",
-          date: m.date,
-          entryType: "meeting",
-          shiftType: "clinical",
+          id: `ft_${Date.now()}_${i}`, job: "fulltime", date: m.date,
+          entryType: "meeting", shiftType: "clinical",
           hours: 0, ordinaryHours: 0, eveningHours: 0,
           isPublicHoliday: false, kempseyRate: "morning",
-          startTime: m.start, endTime: m.end,
-          notes,
+          startTime: m.start, endTime: m.end, notes,
         });
       });
       return [...prev, ...additions];
@@ -1046,9 +1165,7 @@ export default function ShiftTracker() {
   const confirmImport = () => {
     const { result } = importState;
     setShifts(prev => {
-      const have = new Set(
-        prev.map(s => `${s.date}|${s.startTime || ""}|${s.shiftType}|${s.notes || ""}`)
-      );
+      const have = new Set(prev.map(s => `${s.date}|${s.startTime || ""}|${s.shiftType}|${s.notes || ""}`));
       const additions = [];
       result.shifts.forEach((s, i) => {
         const date = ymd(s.date);
@@ -1058,19 +1175,13 @@ export default function ShiftTracker() {
         if (have.has(key)) return;
         have.add(key);
         additions.push({
-          id: `${Date.now()}_${i}`,
-          job: "aspen",
-          date,
-          entryType: "shift",
-          shiftType: isOncall ? "oncall" : "clinical",
+          id: `${Date.now()}_${i}`, job: "aspen", date,
+          entryType: "shift", shiftType: isOncall ? "oncall" : "clinical",
           hours: isOncall ? 0 : s.hours,
           ordinaryHours: isOncall ? 0 : s.ordinaryHours,
           eveningHours: isOncall ? 0 : s.eveningHours,
-          isPublicHoliday: false,
-          kempseyRate: "morning",
-          startTime: s.start || "",
-          endTime: s.end || "",
-          notes,
+          isPublicHoliday: false, kempseyRate: "morning",
+          startTime: s.start || "", endTime: s.end || "", notes,
         });
       });
       return [...prev, ...additions];
@@ -1085,44 +1196,45 @@ export default function ShiftTracker() {
     if (m > 11) { m = 0; y++; }
     setCalMonth(m);
     setCalYear(y);
-  };
-
-  const handleDayClick = (dateStr) => {
-    setSelectedDate(dateStr);
-    setView("list");
+    setSelectedDate(null);
   };
 
   const filtered = shifts.filter(s => jobFilter === "all" || s.job === jobFilter);
-  const fortnights = [...new Set(filtered.filter(s => s.entryType === "shift").map(shiftFortnightKey))].sort().reverse();
   const today = todaySydney();
   const currentFn = getFortnightKey(today);
 
-  const selectedShifts = selectedDate
+  const listShifts = selectedDate
     ? filtered.filter(s => s.date === selectedDate)
     : filtered.filter(s => shiftFortnightKey(s) === currentFn);
 
   if (!loaded) return <div style={{ padding: 40, textAlign: "center", color: "var(--muted)" }}>Loading...</div>;
+
+  const tabs = [
+    { id: "calendar", icon: Calendar, label: "Calendar" },
+    { id: "pay", icon: DollarSign, label: "Pay" },
+    { id: "list", icon: FileText, label: "List" },
+    { id: "rates", icon: Settings, label: "Rates" },
+  ];
 
   return (
     <div style={{
       "--bg": "#f8faf4", "--surface": "#ffffff", "--text": "#0a0a0a", "--muted": "#6b7563",
       "--border": "#e3e8dc", "--accent": "#0a654a", "--accent-light": "#d4f0b6", "--hover": "#eef3e6",
       fontFamily: "'Inter', -apple-system, system-ui, sans-serif",
-      color: "var(--text)", background: "var(--bg)", minHeight: "100vh", padding: "0 0 80px 0",
-      maxWidth: 960, margin: "0 auto",
+      color: "var(--text)", background: "var(--bg)", minHeight: "100vh",
+      maxWidth: 520, margin: "0 auto",
+      paddingTop: "env(safe-area-inset-top, 0px)",
     }}>
       {/* Header */}
-      <div style={{ padding: "20px 16px 12px", borderBottom: "1px solid var(--border)", background: "var(--surface)" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
-          <div>
-            <h1 style={{ margin: 0, fontSize: 20, fontWeight: 800, letterSpacing: "-0.02em" }}>Shift Tracker</h1>
-            <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--muted)" }}>Track shifts, meetings, and pay across three jobs</p>
-          </div>
+      <div style={{ padding: "16px 16px 10px", background: "var(--surface)", borderBottom: "1px solid var(--border)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <h1 style={{ margin: 0, fontSize: 20, fontWeight: 800, letterSpacing: "-0.02em" }}>Shift Tracker</h1>
           <button
             onClick={() => fileInputRef.current && fileInputRef.current.click()}
-            style={{ ...tagBtn, display: "flex", alignItems: "center", gap: 6, background: JOBS.aspen.color, color: "#fff", borderColor: JOBS.aspen.color, flexShrink: 0 }}
+            style={{ ...iconBtnStyle, padding: 8 }}
+            aria-label="Import PDF"
           >
-            <Upload size={14} /> Import PDF
+            <Upload size={20} />
           </button>
         </div>
         <input
@@ -1142,51 +1254,33 @@ export default function ShiftTracker() {
           onConfirmFt={confirmFtImport}
           onClose={() => setImportState(null)}
           existing={shifts}
+          rates={rates}
         />
       )}
 
-      {/* Job filter */}
-      <div style={{ display: "flex", gap: 6, padding: "10px 16px", overflowX: "auto" }}>
-        <button onClick={() => setJobFilter("all")}
-          style={{ ...tagBtn, background: jobFilter === "all" ? "var(--text)" : "var(--surface)", color: jobFilter === "all" ? "#fff" : "var(--text)", borderColor: "var(--border)", flexShrink: 0 }}>
-          All jobs
-        </button>
-        {Object.entries(JOBS).map(([k, v]) => (
-          <button key={k} onClick={() => setJobFilter(k)}
-            style={{ ...tagBtn, background: jobFilter === k ? v.color : "var(--surface)", color: jobFilter === k ? "#fff" : "var(--text)", borderColor: v.color, flexShrink: 0 }}>
-            {v.name}
+      {/* Job filter (not on rates tab) */}
+      {view !== "rates" && (
+        <div style={{ display: "flex", gap: 6, padding: "10px 16px", overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+          <button onClick={() => setJobFilter("all")}
+            style={{ ...tagBtn, background: jobFilter === "all" ? "var(--text)" : "var(--surface)", color: jobFilter === "all" ? "#fff" : "var(--text)", borderColor: "var(--border)", flexShrink: 0, fontSize: 12, padding: "6px 12px" }}>
+            All
           </button>
-        ))}
-      </div>
-
-      {/* Nav tabs */}
-      <div style={{ display: "flex", borderBottom: "1px solid var(--border)", background: "var(--surface)" }}>
-        {[
-          { id: "calendar", icon: Calendar, label: "Calendar" },
-          { id: "pay", icon: DollarSign, label: "Pay" },
-          { id: "list", icon: FileText, label: "List" },
-        ].map(tab => (
-          <button key={tab.id} onClick={() => { setView(tab.id); setSelectedDate(null); }}
-            style={{
-              flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-              padding: "10px 0", border: "none", background: "none", cursor: "pointer",
-              fontSize: 13, fontWeight: view === tab.id ? 700 : 400,
-              color: view === tab.id ? "var(--accent)" : "var(--muted)",
-              borderBottom: view === tab.id ? "2px solid var(--accent)" : "2px solid transparent",
-            }}>
-            <tab.icon size={16} />
-            {tab.label}
-          </button>
-        ))}
-      </div>
+          {Object.entries(JOBS).map(([k, v]) => (
+            <button key={k} onClick={() => setJobFilter(k)}
+              style={{ ...tagBtn, background: jobFilter === k ? v.color : "var(--surface)", color: jobFilter === k ? "#fff" : "var(--text)", borderColor: v.color, flexShrink: 0, fontSize: 12, padding: "6px 12px" }}>
+              {v.name}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Content */}
-      <div style={{ padding: 16 }}>
-        {/* Fatigue */}
-        <FatigueIndicator shifts={shifts} targetDate={today} />
+      <div style={{ padding: "12px 16px 120px" }}>
+        {/* Fatigue (not on rates tab) */}
+        {view !== "rates" && <FatigueIndicator shifts={shifts} targetDate={today} />}
 
-        {/* Current period overall summary (not on Pay tab, which has its own) */}
-        {view !== "pay" && <UpcomingPayCard shifts={filtered} base={today} />}
+        {/* Upcoming pay (calendar & list tabs) */}
+        {(view === "calendar" || view === "list") && <UpcomingPayCard shifts={filtered} base={today} rates={rates} />}
 
         {/* Calendar */}
         {view === "calendar" && (
@@ -1194,27 +1288,29 @@ export default function ShiftTracker() {
             shifts={filtered}
             year={calYear} month={calMonth}
             onNav={handleCalNav}
-            onDayClick={handleDayClick}
+            selectedDate={selectedDate}
+            onDayClick={setSelectedDate}
+            onEdit={openEditForm}
+            onDelete={handleDelete}
+            rates={rates}
+            onAdd={openForm}
           />
         )}
 
-        {/* Pay view: overall + per-job sections, each on its own cycle */}
+        {/* Pay */}
         {view === "pay" && (
           <div>
-            <UpcomingPayCard shifts={filtered} base={today} />
-            <h3 style={{ fontSize: 15, fontWeight: 700, margin: "4px 0 10px" }}>By job — work periods</h3>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12 }}>
-              <JobPayPanel job="aspen" shifts={filtered} base={today} />
-              <JobPayPanel job="kempsey" shifts={filtered} base={today} />
-              <JobPayPanel job="fulltime" shifts={filtered} base={today} />
+            <UpcomingPayCard shifts={filtered} base={today} rates={rates} />
+            <h3 style={{ fontSize: 15, fontWeight: 700, margin: "4px 0 10px" }}>By job</h3>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <JobPayPanel job="aspen" shifts={filtered} base={today} rates={rates} />
+              <JobPayPanel job="kempsey" shifts={filtered} base={today} rates={rates} />
+              <JobPayPanel job="fulltime" shifts={filtered} base={today} rates={rates} />
             </div>
-            <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 12 }}>
-              Each job shows its own pay cycle. Use the arrows on a job to step through its past/future periods.
-            </p>
           </div>
         )}
 
-        {/* List view */}
+        {/* List */}
         {view === "list" && (
           <div>
             {selectedDate && (
@@ -1225,40 +1321,85 @@ export default function ShiftTracker() {
             )}
             {!selectedDate && <h3 style={{ fontSize: 15, fontWeight: 700, margin: "0 0 12px" }}>Current fortnight</h3>}
             <ShiftList
-              shifts={selectedShifts}
-              onEdit={(s) => { setEditShift(s); setShowForm(true); }}
+              shifts={listShifts}
+              onEdit={openEditForm}
               onDelete={handleDelete}
+              rates={rates}
             />
           </div>
         )}
 
-        {/* Form */}
-        {showForm && (
-          <div style={{ marginTop: 16 }}>
-            <ShiftForm
-              editShift={editShift}
-              onSave={handleSave}
-              onCancel={() => { setShowForm(false); setEditShift(null); }}
-            />
-          </div>
+        {/* Rates */}
+        {view === "rates" && (
+          <RatesEditor
+            rates={rates}
+            onUpdateRate={handleUpdateRate}
+            onReset={handleResetRates}
+          />
         )}
       </div>
 
-      {/* FAB */}
-      {!showForm && (
+      {/* Form bottom sheet */}
+      {showForm && (
+        <div style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 200,
+          display: "flex", alignItems: "flex-end", justifyContent: "center",
+        }} onClick={() => { setShowForm(false); setEditShift(null); setFormDefaultDate(null); }}>
+          <div style={{
+            background: "var(--surface)", width: "100%", maxWidth: 520, maxHeight: "90vh",
+            overflowY: "auto", borderRadius: "16px 16px 0 0",
+            padding: "20px 20px calc(20px + env(safe-area-inset-bottom, 0px))",
+            boxShadow: "0 -4px 24px rgba(0,0,0,0.2)",
+          }} onClick={e => e.stopPropagation()}>
+            <ShiftForm
+              editShift={editShift}
+              defaultDate={formDefaultDate}
+              onSave={handleSave}
+              onCancel={() => { setShowForm(false); setEditShift(null); setFormDefaultDate(null); }}
+              rates={rates}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* FAB (not on rates tab) */}
+      {!showForm && view !== "rates" && (
         <button
-          onClick={() => { setEditShift(null); setShowForm(true); }}
+          onClick={() => openForm(selectedDate)}
           style={{
-            position: "fixed", bottom: 20, right: 20, width: 52, height: 52, borderRadius: 26,
+            position: "fixed", bottom: "calc(68px + env(safe-area-inset-bottom, 0px))", right: 20,
+            width: 52, height: 52, borderRadius: 26,
             background: "var(--accent)", color: "#fff", border: "none", cursor: "pointer",
             display: "flex", alignItems: "center", justifyContent: "center",
-            boxShadow: "0 4px 12px rgba(37,99,235,0.4)", zIndex: 100,
+            boxShadow: "0 4px 16px rgba(10,101,74,0.4)", zIndex: 90,
           }}
           aria-label="Add entry"
         >
           <Plus size={24} />
         </button>
       )}
+
+      {/* Bottom tab bar */}
+      <div style={{
+        position: "fixed", bottom: 0, left: 0, right: 0,
+        background: "var(--surface)", borderTop: "1px solid var(--border)",
+        display: "flex", zIndex: 100, maxWidth: 520, margin: "0 auto",
+        paddingBottom: "env(safe-area-inset-bottom, 0px)",
+      }}>
+        {tabs.map(tab => (
+          <button key={tab.id}
+            onClick={() => { setView(tab.id); if (tab.id !== "list") setSelectedDate(null); }}
+            style={{
+              flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+              padding: "8px 0 6px", gap: 2, border: "none", background: "none", cursor: "pointer",
+              color: view === tab.id ? "var(--accent)" : "var(--muted)",
+              fontSize: 10, fontWeight: view === tab.id ? 600 : 400,
+            }}>
+            <tab.icon size={22} strokeWidth={view === tab.id ? 2.5 : 2} />
+            {tab.label}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

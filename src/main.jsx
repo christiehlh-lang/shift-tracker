@@ -8,3 +8,7 @@ createRoot(document.getElementById("root")).render(
     <ShiftTracker />
   </StrictMode>
 );
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/shift-tracker/sw.js").catch(() => {});
+}

@@ -1,0 +1,9 @@
+{
+  "name": "Shift Tracker",
+  "short_name": "Shifts",
+  "start_url": "/shift-tracker/",
+  "display": "standalone",
+  "background_color": "#f8faf4",
+  "theme_color": "#0a654a",
+  "orientation": "portrait"
+}
