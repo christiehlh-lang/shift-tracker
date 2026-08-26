@@ -1,18 +1,11 @@
 import { useState, useEffect, useRef } from "react";
 import { Calendar, DollarSign, Plus, Trash2, ChevronLeft, ChevronRight, X, AlertTriangle, FileText, Edit3, Upload, Check } from "lucide-react";
-import { parseAspenPdf } from "./aspenPdf";
+import { parseAspenPdf, ASPEN_RATES as _ASPEN_PDF_RATES } from "./aspenPdf";
 import { parseFulltimePdf, detectPdfKind } from "./fulltimePdf";
 
 // ─── Pay rate configs ───
 const ASPEN_RATES = {
-  ordinary: 44.14,
-  evening: 50.76,
-  saturday: 66.21,
-  sunday: 77.25,
-  publicHoliday: 88.28,
-  onCallMF: 50.00,
-  onCallSat: 80.00,
-  onCallSunPH: 110.00,
+  ..._ASPEN_PDF_RATES,
   calledIn15: 66.21,
   calledIn2: 88.28,
 };

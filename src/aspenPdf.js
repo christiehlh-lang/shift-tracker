@@ -14,11 +14,11 @@
 // CS / CS24 (safety check) / SA are excluded.
 
 export const ASPEN_RATES = {
-  ordinary: 52.5,
-  evening: 60.38,
-  saturday: 78.7,
-  sunday: 91.8,
-  publicHoliday: 105.0,
+  ordinary: 44.14,
+  evening: 50.76,
+  saturday: 66.21,
+  sunday: 77.25,
+  publicHoliday: 88.28,
   onCallMF: 50.0,
   onCallSat: 80.0,
   onCallSunPH: 110.0,
