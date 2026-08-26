@@ -5,16 +5,16 @@ import { parseFulltimePdf, detectPdfKind } from "./fulltimePdf";
 
 // ─── Pay rate configs ───
 const ASPEN_RATES = {
-  ordinary: 52.50,
-  evening: 60.38,
-  saturday: 78.70,
-  sunday: 91.80,
-  publicHoliday: 105.00,
+  ordinary: 44.14,
+  evening: 50.76,
+  saturday: 66.21,
+  sunday: 77.25,
+  publicHoliday: 88.28,
   onCallMF: 50.00,
   onCallSat: 80.00,
   onCallSunPH: 110.00,
-  calledIn15: 78.00,
-  calledIn2: 105.00,
+  calledIn15: 66.21,
+  calledIn2: 88.28,
 };
 
 const KEMPSEY_RATES = {
